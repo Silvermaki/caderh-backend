@@ -1,0 +1,44 @@
+{
+  "name": "caderh-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node-pg-migrate up && nodemon src/index.js",
+    "migrate": "node-pg-migrate"
+  },
+  "author": "CADERH",
+  "license": "ISC",
+  "dependencies": {
+    "config": "^3.3.11",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.1",
+    "excel4node": "^1.8.2",
+    "express": "^4.18.2",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^1.4.5-lts.1",
+    "node-pg-migrate": "^6.2.2",
+    "nodemailer": "^6.9.9",
+    "pdfmake": "^0.2.10",
+    "pg": "^8.16.3",
+    "pg-hstore": "^2.3.4",
+    "sequelize": "^6.37.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "eslint": "^9.39.1",
+    "globals": "^16.5.0",
+    "husky": "^9.0.10",
+    "nodemon": "^3.1.11",
+    "prettier": "3.2.5"
+  },
+  "husky": {
+    "hooks": {
+      "pre-commit": "lint-staged",
+      "pre-push": "npm test"
+    }
+  }
+}
