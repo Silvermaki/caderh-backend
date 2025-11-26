@@ -35,7 +35,7 @@ function decryptPassword(text) {
 
 function generateRecoveryCode(size) {
     var result = '';
-    var characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    var characters = '0123456789';
     for (var i = 0; i < size; i++) {
         result += characters.charAt(Math.floor(Math.random() * characters.length));
     }

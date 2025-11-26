@@ -8,8 +8,8 @@ insert into
   )
 values
   (
-    'superadmin@caderh.com',
-    'a63f3c2468ff11406a18b1be075fd235425e3ae5dd20ecf7209f73aa52c2feff',
+    'superadmin@caderh.hn',
+    '4bffc6266ce03bfd0059ea1e915c1f5bde31e3561aa7ba7b89d393ef5fabc0c0',
     'SUPERADMIN',
     'ADMIN',
     false

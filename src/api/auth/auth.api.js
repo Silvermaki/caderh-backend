@@ -2,6 +2,7 @@ import { Router } from "express";
 import { crypto } from "../../utils/crypto.js";
 import { users } from "../../utils/sequelize.js";
 import { mailer } from "../../utils/mailer.js";
+import { verify_token } from "../../utils/token.js";
 import jwt from "jsonwebtoken";
 
 export const router = Router();
@@ -14,6 +15,8 @@ router.post('/login',
     async (req, res, next) => {
         try {
             const { email, password } = req.body;
+            console.log(email);
+            console.log(password);
             if (email && password) {
                 const user = await users.findOne({
                     where: {
@@ -33,10 +36,32 @@ router.post('/login',
                         first_login: userData.first_login
                     })
                 } else {
-                    res.status(400).json({ message: 'Credenciales incorrectas' });
+                    res.status(400).json({ message: 'Incorrect username or password' });
                 }
             } else {
-                res.status(400).json({ message: 'Credenciales incorrectas' });
+                res.status(400).json({ message: 'Incorrect username or password' });
+            }
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post('/new-pass', verify_token,
+    async (req, res, next) => {
+        try {
+            const { password } = req.body;
+            if (password) {
+                await users.update({
+                    password: crypto.encryptPassword(password),
+                    first_login: false,
+                    verification_code: null
+                }, {
+                    where: { id: req.user_id }
+                });
+                res.status(200).json({ ok: true });
+            } else {
+                res.status(400).json({ message: 'Wrong password format' });
             }
         } catch (e) {
             next(e);
@@ -48,6 +73,7 @@ router.post('/recover',
     async (req, res, next) => {
         try {
             const { email } = req.body;
+            console.log(email);
             if (email) {
                 const user = await users.findOne({
                     where: {
@@ -57,7 +83,7 @@ router.post('/recover',
                 });
                 if (user) {
                     let userData = user.toJSON();
-                    const verificationCode = crypto.generateRecoveryCode(5);
+                    const verificationCode = crypto.generateRecoveryCode(6);
                     await users.update({
                         verification_code: verificationCode
                     }, {
@@ -66,7 +92,7 @@ router.post('/recover',
                     await mailer.sendRecoveryCode(email, userData.name, verificationCode);
                 }
             }
-            res.status(200).json();
+            res.status(200).json({ ok: true });
         } catch (e) {
             next(e);
         }

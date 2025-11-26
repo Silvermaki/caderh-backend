@@ -29,7 +29,7 @@ export const users = sequelize.define('users', {
         type: DataTypes.TEXT,
         allowNull: false,
     },
-    type: {
+    role: {
         type: DataTypes.TEXT,
         allowNull: false,
     },
