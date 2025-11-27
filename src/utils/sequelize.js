@@ -16,6 +16,7 @@ export const users = sequelize.define('users', {
         type: DataTypes.UUID,
         primaryKey: true,
         allowNull: false,
+        defaultValue: Sequelize.literal('gen_random_uuid()')
     },
     email: {
         type: DataTypes.TEXT,
@@ -36,14 +37,17 @@ export const users = sequelize.define('users', {
     created_dt: {
         type: DataTypes.DATE,
         allowNull: false,
+        defaultValue: Sequelize.literal('now()::timestamp')
     },
     disabled: {
         type: DataTypes.BOOLEAN,
         allowNull: false,
+        defaultValue: false
     },
     first_login: {
         type: DataTypes.BOOLEAN,
         allowNull: false,
+        defaultValue: true
     },
     verification_code: {
         type: DataTypes.TEXT,

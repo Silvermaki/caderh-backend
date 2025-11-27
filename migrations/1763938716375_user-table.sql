@@ -9,7 +9,7 @@ create table if not exists caderh.users (
     name text not null,
     password text not null,
     role caderh.user_role not null default 'USER',
-    created_dt timestamp not null default now(),
+    created_dt timestamp not null default now()::timestamp,
     disabled boolean not null default false,
     first_login boolean not null default true,
     verification_code text
