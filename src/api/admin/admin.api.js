@@ -75,7 +75,8 @@ router.get('/users', verify_token, is_admin,
                 const result = await users.findAndCountAll({
                     attributes: ['id', 'email', 'name', 'role', 'disabled', 'first_login', 'created_dt'],
                     where: search ? { [Op.or]: { email: { [Op.iLike]: `%${search}%` }, name: { [Op.iLike]: `%${search}%` } } } : undefined,
-                    limit,
+                    order: sort ? [[sort, desc]] : undefined,
+                    limit: limit,
                     offset: offset ?? 0
                 });
                 res.status(200).json({ data: result.rows, count: result.count });
@@ -100,6 +101,28 @@ router.put('/user', verify_token, is_admin,
                 }, {
                     where: { id: id }
                 });
+                res.status(200).json({ ok: true });
+            } else {
+                res.status(400).json({ message: 'Faltan campos requeridos' });
+            }
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.put('/user/reset-password', verify_token, is_admin,
+    async (req, res, next) => {
+        try {
+            const { id, email, name, role } = req.body;
+            if (id && email, name, role) {
+                let newPass = crypto.generatePassword(8);
+                await users.update({
+                    password: crypto.encryptPassword(newPass)
+                }, {
+                    where: { id: id }
+                });
+                await mailer.sendAccountEmail(email, name, newPass, role === 'ADMIN' ? 'Administrador' : 'Agente');
                 res.status(200).json({ ok: true });
             } else {
                 res.status(400).json({ message: 'Faltan campos requeridos' });
