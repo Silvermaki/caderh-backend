@@ -1,4 +1,5 @@
 import pg from 'pg';
+import fs from 'fs';
 
 const dbConfig = {
     host: process.env.PGHOST,
@@ -9,6 +10,10 @@ const dbConfig = {
     max: 50,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 15000,
+    ssl: {
+        rejectUnauthorized: true,
+        ca: fs.readFileSync('src/certificates/us-east-1-bundle.pem').toString()
+    }
 }
 
 const db_ref = new pg.Pool(dbConfig);

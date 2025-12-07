@@ -1,4 +1,5 @@
 import { Sequelize, DataTypes } from "sequelize";
+import fs from 'fs';
 
 export const sequelize = new Sequelize(process.env.PGDATABASE, process.env.PGUSER, process.env.PGPASSWORD, {
     host: process.env.PGHOST,
@@ -8,6 +9,12 @@ export const sequelize = new Sequelize(process.env.PGDATABASE, process.env.PGUSE
         min: 10,
         acquire: 30000,
         idle: 10000
+    },
+    dialectOptions: {
+        ssl: {
+            rejectUnauthorized: true,
+            ca: fs.readFileSync('src/certificates/us-east-1-bundle.pem').toString()
+        }
     }
 });
 
