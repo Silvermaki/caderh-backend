@@ -1,0 +1,1 @@
+ALTER TYPE caderh.user_role ADD VALUE 'MANAGER' AFTER 'USER';
