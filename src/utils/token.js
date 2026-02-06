@@ -26,3 +26,11 @@ export const is_admin = (req, res, next) => {
         return res.status(403).send({ auth: false, title: "Unauthorized", message: "Forbidden" });
     }
 }
+
+export const is_supervisor = (req, res, next) => {
+    if (req.user_role === 'MANAGER' || req.user_role === 'ADMIN') {
+        next();
+    } else {
+        return res.status(403).send({ auth: false, title: "Unauthorized", message: "Forbidden" });
+    }
+}
