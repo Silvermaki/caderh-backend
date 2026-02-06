@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { crypto } from "../../utils/crypto.js";
-import { users } from "../../utils/sequelize.js";
+import { users, user_logs } from "../../utils/sequelize.js";
 import { mailer } from "../../utils/mailer.js";
 import { verify_token, is_admin } from "../../utils/token.js";
 import { Op } from 'sequelize';
@@ -25,13 +25,17 @@ router.post('/user', verify_token, is_admin,
                     res.status(400).json({ message: 'Correo electrónico en uso' });
                 } else {
                     let newPass = crypto.generatePassword(8);
-                    await users.create({
+                    const user = await users.create({
                         email,
                         name,
                         role,
                         password: crypto.encryptPassword(newPass),
                     });
-                    await mailer.sendAccountEmail(email, name, newPass, role === 'ADMIN' ? 'Administrador' : 'Agente');
+                    await mailer.sendAccountEmail(email, name, newPass, role === 'ADMIN' ? 'Administrador' : role === 'MANAGER' ? 'Supervisor' : 'Agente');
+                    await user_logs.create({
+                        user_id: req.user_id,
+                        log: `Creó nuevo usuario con parámetros ID: ${user.id}, CORREO: ${email}, ROL: ${role}, NOMBRE: ${name}`
+                    });
                     res.status(200).json({ ok: true });
                 }
             } else {
@@ -101,6 +105,10 @@ router.put('/user', verify_token, is_admin,
                 }, {
                     where: { id: id }
                 });
+                await user_logs.create({
+                    user_id: req.user_id,
+                    log: `Actualizó usuario con parámetros ID: ${id}, ESTADO: ${disabled}, ROL: ${role}, NOMBRE: ${name}`
+                });
                 res.status(200).json({ ok: true });
             } else {
                 res.status(400).json({ message: 'Faltan campos requeridos' });
@@ -122,7 +130,11 @@ router.put('/user/reset-password', verify_token, is_admin,
                 }, {
                     where: { id: id }
                 });
-                await mailer.sendAccountEmail(email, name, newPass, role === 'ADMIN' ? 'Administrador' : 'Agente');
+                await mailer.sendAccountEmail(email, name, newPass, role === 'ADMIN' ? 'Administrador' : role === 'MANAGER' ? 'Supervisor' : 'Agente');
+                await user_logs.create({
+                    user_id: req.user_id,
+                    log: `Solicitó cambio de contraseña a usuario con parámetros ID: ${id}, CORREO: ${email}, ROL: ${role}, NOMBRE: ${name}`
+                });
                 res.status(200).json({ ok: true });
             } else {
                 res.status(400).json({ message: 'Faltan campos requeridos' });
