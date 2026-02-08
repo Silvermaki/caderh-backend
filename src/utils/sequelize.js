@@ -88,6 +88,8 @@ export const user_logs = sequelize.define('user_logs', {
     }
 }, { freezeTableName: true, timestamps: false, schema: "caderh", tableName: "user_logs" });
 
+user_logs.belongsTo(users, { foreignKey: 'user_id', as: 'user' });
+
 export const financing_sources = sequelize.define('financing_sources', {
     id: {
         type: DataTypes.UUID,

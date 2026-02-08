@@ -119,6 +119,46 @@ router.put('/user', verify_token, is_admin,
     }
 );
 
+router.get('/logs', verify_token, is_admin,
+    async (req, res, next) => {
+        try {
+            const { limit, offset, sort, desc, user_id, role } = req.query;
+            if (limit && limit <= 100) {
+                const where = {};
+                if (user_id) where.user_id = user_id;
+                const include = [{
+                    model: users,
+                    as: 'user',
+                    attributes: ['name', 'role'],
+                    required: true,
+                    where: role ? { role } : undefined
+                }];
+                const result = await user_logs.findAndCountAll({
+                    attributes: ['id', 'log', 'created_dt', 'user_id'],
+                    include,
+                    where: Object.keys(where).length ? where : undefined,
+                    order: sort ? [[sort, desc === 'desc' ? 'DESC' : 'ASC']] : [['created_dt', 'DESC']],
+                    limit: parseInt(limit, 10),
+                    offset: parseInt(offset || '0', 10)
+                });
+                const rows = result.rows.map((r) => ({
+                    id: r.id,
+                    log: r.log,
+                    created_dt: r.created_dt,
+                    user_id: r.user_id,
+                    user_name: r.user?.name ?? '-',
+                    user_role: r.user?.role ?? '-'
+                }));
+                res.status(200).json({ data: rows, count: result.count });
+            } else {
+                res.status(400).json({ message: 'Faltan campos requeridos' });
+            }
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
 router.put('/user/reset-password', verify_token, is_admin,
     async (req, res, next) => {
         try {
