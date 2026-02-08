@@ -198,6 +198,35 @@ router.post("/project/wizard/step1", verify_token, is_supervisor,
     }
 );
 
+// Step 2: Get financing sources
+router.get("/project/wizard/step2/:projectId", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId } = req.params;
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+            const rows = await project_financing_sources.findAll({ where: { project_id: projectId } });
+            const sourceIds = [...new Set(rows.map((r) => r.financing_source_id))];
+            const sources = sourceIds.length > 0
+                ? await financing_sources.findAll({ where: { id: { [Op.in]: sourceIds } }, attributes: ["id", "name"] })
+                : [];
+            const sourceMap = Object.fromEntries(sources.map((s) => [s.id, s.name]));
+            const data = rows.map((r) => ({
+                id: r.id,
+                financing_source_id: r.financing_source_id,
+                amount: r.amount,
+                description: r.description,
+                financing_source_name: sourceMap[r.financing_source_id] ?? null,
+            }));
+            res.status(200).json({ data });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
 // Step 2: Financing sources (replace all)
 router.put("/project/wizard/step2/:projectId", verify_token, is_supervisor,
     async (req, res, next) => {
@@ -239,6 +268,26 @@ router.put("/project/wizard/step2/:projectId", verify_token, is_supervisor,
             });
 
             res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Step 3: Get donations
+router.get("/project/wizard/step3/:projectId", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId } = req.params;
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+            const data = await project_donations.findAll({
+                where: { project_id: projectId },
+                attributes: ["id", "amount", "description", "donation_type"],
+            });
+            res.status(200).json({ data });
         } catch (e) {
             next(e);
         }
@@ -289,6 +338,26 @@ router.put("/project/wizard/step3/:projectId", verify_token, is_supervisor,
     }
 );
 
+// Step 4: Get expenses
+router.get("/project/wizard/step4/:projectId", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId } = req.params;
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+            const data = await project_expenses.findAll({
+                where: { project_id: projectId },
+                attributes: ["id", "amount", "description"],
+            });
+            res.status(200).json({ data });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
 // Step 4: Expenses (replace all)
 router.put("/project/wizard/step4/:projectId", verify_token, is_supervisor,
     async (req, res, next) => {
@@ -325,6 +394,26 @@ router.put("/project/wizard/step4/:projectId", verify_token, is_supervisor,
             });
 
             res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Step 5: Get files
+router.get("/project/wizard/step5/:projectId", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId } = req.params;
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+            const data = await project_files.findAll({
+                where: { project_id: projectId },
+                attributes: ["id", "file", "description", "created_dt"],
+            });
+            res.status(200).json({ data });
         } catch (e) {
             next(e);
         }
