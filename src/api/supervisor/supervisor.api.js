@@ -159,7 +159,7 @@ router.get("/projects", verify_token, is_supervisor,
 
             const result = await projects.findAndCountAll({
                 attributes: [
-                    "id", "name", "description", "objectives", "start_date", "end_date", "created_dt",
+                    "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "created_dt",
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
@@ -220,7 +220,7 @@ router.get("/projects/:id", verify_token, is_supervisor,
             const project = await projects.findOne({
                 where: { id },
                 attributes: [
-                    "id", "name", "description", "objectives", "start_date", "end_date", "created_dt",
+                    "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "created_dt",
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
@@ -240,13 +240,41 @@ router.get("/projects/:id", verify_token, is_supervisor,
     }
 );
 
+// PATCH accomplishments (update logros without full edit)
+router.patch("/projects/:id/accomplishments", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const { accomplishments } = req.body;
+            const project = await projects.findOne({ where: { id } });
+            if (!project) {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+            let accomplishmentsArr = [];
+            if (Array.isArray(accomplishments)) {
+                accomplishmentsArr = accomplishments
+                    .filter((a) => a && typeof a.text === "string" && typeof a.completed === "boolean")
+                    .map((a) => ({ text: String(a.text).trim(), completed: Boolean(a.completed) }));
+            }
+            await projects.update({ accomplishments: accomplishmentsArr }, { where: { id } });
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Actualizó logros del proyecto ID: ${id}`,
+            });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
 // --- Project Wizard ---
 
 // Step 1: Create or update project (project_id opcional: si viene, actualiza; si no, crea)
 router.post("/project/wizard/step1", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
-            const { project_id, name, description, objectives, start_date, end_date } = req.body;
+            const { project_id, name, description, objectives, start_date, end_date, accomplishments } = req.body;
             if (!name || !description || !objectives || !start_date || !end_date) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
@@ -259,12 +287,20 @@ router.post("/project/wizard/step1", verify_token, is_supervisor,
                 return res.status(400).json({ message: "Fechas inválidas" });
             }
 
+            let accomplishmentsArr = [];
+            if (Array.isArray(accomplishments)) {
+                accomplishmentsArr = accomplishments
+                    .filter((a) => a && typeof a.text === "string" && typeof a.completed === "boolean")
+                    .map((a) => ({ text: String(a.text).trim(), completed: Boolean(a.completed) }));
+            }
+
             const payload = {
                 name: name.trim(),
                 description: description.trim(),
                 objectives: objectives.trim(),
                 start_date,
                 end_date,
+                accomplishments: accomplishmentsArr,
             };
 
             if (project_id && String(project_id).trim()) {
