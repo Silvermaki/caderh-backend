@@ -148,11 +148,11 @@ router.delete('/financing-source', verify_token, is_supervisor,
 
 // --- Project Wizard ---
 
-// Step 1: Create project
+// Step 1: Create or update project (project_id opcional: si viene, actualiza; si no, crea)
 router.post("/project/wizard/step1", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
-            const { name, description, objectives, start_date, end_date } = req.body;
+            const { project_id, name, description, objectives, start_date, end_date } = req.body;
             if (!name || !description || !objectives || !start_date || !end_date) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
@@ -165,60 +165,33 @@ router.post("/project/wizard/step1", verify_token, is_supervisor,
                 return res.status(400).json({ message: "Fechas inválidas" });
             }
 
-            const project = await projects.create({
+            const payload = {
                 name: name.trim(),
                 description: description.trim(),
                 objectives: objectives.trim(),
                 start_date,
                 end_date,
-            });
+            };
 
+            if (project_id && String(project_id).trim()) {
+                const project = await projects.findOne({ where: { id: project_id } });
+                if (!project) {
+                    return res.status(404).json({ message: "Proyecto no encontrado" });
+                }
+                await projects.update(payload, { where: { id: project_id } });
+                await user_logs.create({
+                    user_id: req.user_id,
+                    log: `Actualizó proyecto ID: ${project_id}, NOMBRE: ${payload.name}`,
+                });
+                return res.status(200).json({ project_id: project_id });
+            }
+
+            const project = await projects.create(payload);
             await user_logs.create({
                 user_id: req.user_id,
                 log: `Creó proyecto ID: ${project.id}, NOMBRE: ${project.name}`,
             });
-
             res.status(200).json({ project_id: project.id });
-        } catch (e) {
-            next(e);
-        }
-    }
-);
-
-// Step 1: Update project
-router.put("/project/wizard/step1/:projectId", verify_token, is_supervisor,
-    async (req, res, next) => {
-        try {
-            const { projectId } = req.params;
-            const { name, description, objectives, start_date, end_date } = req.body;
-            if (!name || !description || !objectives || !start_date || !end_date) {
-                return res.status(400).json({ message: "Faltan campos requeridos" });
-            }
-            if (typeof name !== "string" || name.trim().length < 2) {
-                return res.status(400).json({ message: "Nombre inválido" });
-            }
-            const start = new Date(start_date);
-            const end = new Date(end_date);
-            if (isNaN(start.getTime()) || isNaN(end.getTime()) || start > end) {
-                return res.status(400).json({ message: "Fechas inválidas" });
-            }
-
-            const project = await projects.findOne({ where: { id: projectId } });
-            if (!project) {
-                return res.status(404).json({ message: "Proyecto no encontrado" });
-            }
-
-            await projects.update(
-                { name: name.trim(), description: description.trim(), objectives: objectives.trim(), start_date, end_date },
-                { where: { id: projectId } }
-            );
-
-            await user_logs.create({
-                user_id: req.user_id,
-                log: `Actualizó proyecto ID: ${projectId}, NOMBRE: ${name}`,
-            });
-
-            res.status(200).json({ ok: true });
         } catch (e) {
             next(e);
         }
@@ -415,7 +388,7 @@ router.delete("/project/wizard/step5/:projectId/:fileId", verify_token, is_super
                 return res.status(404).json({ message: "Archivo no encontrado" });
             }
 
-            const fullPath = path.join(__dirname, "../files", pf.file);
+            const fullPath = path.join(__dirname, "../../files", pf.file);
             if (fs.existsSync(fullPath)) {
                 fs.unlinkSync(fullPath);
             }
