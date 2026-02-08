@@ -1,8 +1,8 @@
 import { Router } from "express";
 import path from "path";
 import fs from "fs";
-import { users, user_logs, financing_sources, projects, project_financing_sources, project_donations, project_expenses, project_files } from "../../utils/sequelize.js";
-import { projectFileUpload } from "../../utils/upload.js";
+import { sequelize, users, user_logs, financing_sources, projects, project_financing_sources, project_donations, project_expenses, project_files, project_beneficiaries, project_logs } from "../../utils/sequelize.js";
+import { projectFileUpload, buildProjectFilePath } from "../../utils/upload.js";
 import { verify_token, is_supervisor } from "../../utils/token.js";
 import { Op } from "sequelize";
 import { fileURLToPath } from "url";
@@ -140,6 +140,100 @@ router.delete('/financing-source', verify_token, is_supervisor,
             });
 
             res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// List projects
+router.get("/projects", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { limit, offset, sort, desc, search } = req.query;
+            if (!limit || limit > 100) return res.status(400).json({ message: "Faltan campos requeridos" });
+
+            const where = search
+                ? { [Op.or]: { name: { [Op.iLike]: `%${search}%` }, description: { [Op.iLike]: `%${search}%` } } }
+                : undefined;
+
+            const result = await projects.findAndCountAll({
+                attributes: [
+                    "id", "name", "description", "objectives", "start_date", "end_date", "created_dt",
+                    [sequelize.literal(`(
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
+                    )`), "financed_amount"],
+                    [sequelize.literal(`(
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_expenses WHERE project_id = "projects".id), 0)
+                    )`), "total_expenses"],
+                ],
+                where,
+                order: sort ? [[sort, desc]] : undefined,
+                limit: Number(limit),
+                offset: Number(offset ?? 0),
+            });
+
+            res.status(200).json({ data: result.rows, count: result.count });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Delete project
+router.delete("/projects/:id", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const project = await projects.findOne({ where: { id } });
+            if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            const projectId = id;
+            const files = await project_files.findAll({ where: { project_id: projectId } });
+            for (const pf of files) {
+                const fullPath = path.join(__dirname, "../../files", pf.file);
+                if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+            }
+            await project_files.destroy({ where: { project_id: projectId } });
+            await project_expenses.destroy({ where: { project_id: projectId } });
+            await project_donations.destroy({ where: { project_id: projectId } });
+            await project_financing_sources.destroy({ where: { project_id: projectId } });
+            await project_beneficiaries.destroy({ where: { project_id: projectId } });
+            await project_logs.destroy({ where: { project_id: projectId } });
+            await projects.destroy({ where: { id } });
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Eliminó proyecto ID: ${projectId}, NOMBRE: ${project.name}`,
+            });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Get single project with financial totals
+router.get("/projects/:id", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const project = await projects.findOne({
+                where: { id },
+                attributes: [
+                    "id", "name", "description", "objectives", "start_date", "end_date", "created_dt",
+                    [sequelize.literal(`(
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
+                    )`), "financed_amount"],
+                    [sequelize.literal(`(
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_expenses WHERE project_id = "projects".id), 0)
+                    )`), "total_expenses"],
+                ],
+            });
+            if (!project) {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+            res.status(200).json({ data: project });
         } catch (e) {
             next(e);
         }
@@ -285,7 +379,7 @@ router.get("/project/wizard/step3/:projectId", verify_token, is_supervisor,
             }
             const data = await project_donations.findAll({
                 where: { project_id: projectId },
-                attributes: ["id", "amount", "description", "donation_type"],
+                attributes: ["id", "amount", "description", "donation_type", "created_dt"],
             });
             res.status(200).json({ data });
         } catch (e) {
@@ -435,6 +529,7 @@ router.post("/project/wizard/step5/:projectId", verify_token, is_supervisor,
         try {
             const { projectId } = req.params;
             const description = req.body?.description ?? "";
+            const customFilename = req.body?.filename?.trim() || null;
 
             if (!req.file) {
                 return res.status(400).json({ message: "Falta el archivo" });
@@ -445,21 +540,44 @@ router.post("/project/wizard/step5/:projectId", verify_token, is_supervisor,
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
 
-            const filename = req.file.filename;
-            const relativePath = path.join("projects", projectId, filename);
+            const relativePath = buildProjectFilePath(projectId, customFilename, req.file.originalname);
+            const fullPath = path.join(__dirname, "../../files", relativePath);
+            const destDir = path.dirname(fullPath);
+            fs.mkdirSync(destDir, { recursive: true });
+            fs.writeFileSync(fullPath, req.file.buffer);
 
-            await project_files.create({
+            const displayName = path.basename(relativePath);
+
+            const pf = await project_files.create({
                 project_id: projectId,
                 file: relativePath,
-                description: description.toString().trim() || filename,
+                description: description.toString().trim() || displayName,
             });
 
             await user_logs.create({
                 user_id: req.user_id,
-                log: `Subió archivo al proyecto ID: ${projectId}, archivo: ${filename}`,
+                log: `Subió archivo al proyecto ID: ${projectId}, archivo: ${displayName}`,
             });
 
-            res.status(200).json({ ok: true });
+            res.status(200).json({ ok: true, file_id: pf.id });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Download file (for project detail)
+router.get("/project/:projectId/file/:fileId/download", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId, fileId } = req.params;
+            const pf = await project_files.findOne({ where: { id: fileId, project_id: projectId } });
+            if (!pf) return res.status(404).json({ message: "Archivo no encontrado" });
+            const fullPath = path.join(__dirname, "../../files", pf.file);
+            if (!fs.existsSync(fullPath)) return res.status(404).json({ message: "Archivo no encontrado en disco" });
+            const filename = path.basename(pf.file);
+            res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+            res.sendFile(path.resolve(fullPath));
         } catch (e) {
             next(e);
         }
@@ -489,6 +607,151 @@ router.delete("/project/wizard/step5/:projectId/:fileId", verify_token, is_super
                 log: `Eliminó archivo del proyecto ID: ${projectId}, archivo ID: ${fileId}`,
             });
 
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// --- Project Detail: Single-item CRUD ---
+
+// Add single financing source
+router.post("/project/:projectId/financing-source", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId } = req.params;
+            const { financing_source_id, amount, description } = req.body ?? {};
+            if (!financing_source_id || (typeof amount !== "number" && typeof amount !== "string")) {
+                return res.status(400).json({ message: "Se requieren financing_source_id y amount" });
+            }
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            const srcExists = await financing_sources.findOne({ where: { id: financing_source_id } });
+            if (!srcExists) return res.status(400).json({ message: "Fuente de financiamiento no encontrada" });
+            const row = await project_financing_sources.create({
+                project_id: projectId,
+                financing_source_id,
+                amount: Number(amount),
+                description: (description ?? "").toString(),
+            });
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Agregó fuente de financiamiento al proyecto ID: ${projectId}`,
+            });
+            res.status(201).json({ ok: true, id: row.id });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Delete single financing source
+router.delete("/project/:projectId/financing-source/:id", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId, id } = req.params;
+            const row = await project_financing_sources.findOne({ where: { id, project_id: projectId } });
+            if (!row) return res.status(404).json({ message: "Fuente no encontrada" });
+            await project_financing_sources.destroy({ where: { id } });
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Eliminó fuente de financiamiento del proyecto ID: ${projectId}`,
+            });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Add single donation
+router.post("/project/:projectId/donation", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId } = req.params;
+            const { amount, donation_type, description } = req.body ?? {};
+            const VALID_TYPES = ["CASH", "SUPPLY"];
+            if ((typeof amount !== "number" && typeof amount !== "string") || !VALID_TYPES.includes(donation_type)) {
+                return res.status(400).json({ message: "Se requieren amount y donation_type (CASH o SUPPLY)" });
+            }
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            const row = await project_donations.create({
+                project_id: projectId,
+                amount: Number(amount),
+                description: (description ?? "").toString(),
+                donation_type,
+            });
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Agregó donación al proyecto ID: ${projectId}`,
+            });
+            res.status(201).json({ ok: true, id: row.id });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Delete single donation
+router.delete("/project/:projectId/donation/:id", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId, id } = req.params;
+            const row = await project_donations.findOne({ where: { id, project_id: projectId } });
+            if (!row) return res.status(404).json({ message: "Donación no encontrada" });
+            await project_donations.destroy({ where: { id } });
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Eliminó donación del proyecto ID: ${projectId}`,
+            });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Add single expense
+router.post("/project/:projectId/expense", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId } = req.params;
+            const { amount, description } = req.body ?? {};
+            if (typeof amount !== "number" && typeof amount !== "string") {
+                return res.status(400).json({ message: "Se requiere amount" });
+            }
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            const row = await project_expenses.create({
+                project_id: projectId,
+                amount: Number(amount),
+                description: (description ?? "").toString(),
+            });
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Agregó gasto al proyecto ID: ${projectId}`,
+            });
+            res.status(201).json({ ok: true, id: row.id });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Delete single expense
+router.delete("/project/:projectId/expense/:id", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId, id } = req.params;
+            const row = await project_expenses.findOne({ where: { id, project_id: projectId } });
+            if (!row) return res.status(404).json({ message: "Gasto no encontrado" });
+            await project_expenses.destroy({ where: { id } });
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Eliminó gasto del proyecto ID: ${projectId}`,
+            });
             res.status(200).json({ ok: true });
         } catch (e) {
             next(e);

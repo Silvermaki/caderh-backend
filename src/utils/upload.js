@@ -9,22 +9,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ALLOWED_EXTENSIONS = [".pdf", ".docx", ".xlsx", ".jpg", ".jpeg", ".png"];
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
-function projectFileStorage() {
-    return multer.diskStorage({
-        destination: (req, file, cb) => {
-            const projectId = req.params.projectId;
-            const dest = path.join(__dirname, "../files/projects", projectId);
-            fs.mkdirSync(dest, { recursive: true });
-            cb(null, dest);
-        },
-        filename: (req, file, cb) => {
-            const ext = path.extname(file.originalname).toLowerCase();
-            const safeExt = ALLOWED_EXTENSIONS.includes(ext) ? ext : ".bin";
-            cb(null, crypto.randomUUID() + safeExt);
-        },
-    });
-}
-
 function fileFilter(req, file, cb) {
     const ext = path.extname(file.originalname).toLowerCase();
     if (!ALLOWED_EXTENSIONS.includes(ext)) {
@@ -35,7 +19,23 @@ function fileFilter(req, file, cb) {
 }
 
 export const projectFileUpload = multer({
-    storage: projectFileStorage(),
+    storage: multer.memoryStorage(),
     fileFilter,
     limits: { fileSize: MAX_FILE_SIZE },
 });
+
+export function sanitizeFilename(name) {
+    return name.replace(/[/\\?%*:|"<>]/g, "_").replace(/\.\./g, "");
+}
+
+export function buildProjectFilePath(projectId, desiredName, originalName) {
+    const ext = path.extname(originalName).toLowerCase();
+    const safeExt = ALLOWED_EXTENSIONS.includes(ext) ? ext : ".bin";
+    const base = sanitizeFilename(desiredName?.trim() || path.basename(originalName, ext) || "file");
+    const filePath = path.join(__dirname, "../files/projects", projectId, base + safeExt);
+    if (fs.existsSync(filePath)) {
+        const uniqueBase = base + "_" + crypto.randomUUID().slice(0, 8);
+        return path.join("projects", projectId, uniqueBase + safeExt);
+    }
+    return path.join("projects", projectId, base + safeExt);
+}
