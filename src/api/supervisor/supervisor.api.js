@@ -6,6 +6,13 @@ import { projectFileUpload, buildProjectFilePath } from "../../utils/upload.js";
 import { verify_token, is_supervisor } from "../../utils/token.js";
 import { Op } from "sequelize";
 import { fileURLToPath } from "url";
+import multer from "multer";
+import {
+    generateFinancingSourcesExcel, generateDonationsExcel, generateExpensesExcel,
+    parseFinancingSourcesExcel, parseDonationsExcel, parseExpensesExcel,
+} from "../../utils/excel-import.js";
+
+const excelUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const router = Router();
@@ -673,6 +680,254 @@ router.delete("/project/wizard/step5/:projectId/:fileId", verify_token, is_super
             });
 
             res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// --- Excel Import/Export ---
+
+// Download financing sources template
+router.get("/project/:projectId/excel/financing-sources", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId } = req.params;
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+
+            const rows = await project_financing_sources.findAll({ where: { project_id: projectId } });
+            const allSources = await financing_sources.findAll({ attributes: ["id", "name"] });
+
+            const wb = generateFinancingSourcesExcel(rows, allSources);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            res.setHeader("Content-Disposition", "attachment; filename=plantilla-fuentes.xlsx");
+            return wb.write("plantilla-fuentes.xlsx", res);
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Process financing sources Excel
+router.post("/project/:projectId/excel/financing-sources", verify_token, is_supervisor, excelUpload.single("file"),
+    async (req, res, next) => {
+        try {
+            const { projectId } = req.params;
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
+
+            const { parsed, errors } = parseFinancingSourcesExcel(req.file.buffer);
+
+            // Validate financing_source_ids exist
+            const allSources = await financing_sources.findAll({ attributes: ["id"] });
+            const validSourceIds = new Set(allSources.map((s) => s.id));
+            const validRows = [];
+            for (const row of parsed) {
+                if (!validSourceIds.has(row.financing_source_id)) {
+                    errors.push({ row: parsed.indexOf(row) + 2, message: `financing_source_id no encontrado: ${row.financing_source_id}` });
+                } else {
+                    validRows.push(row);
+                }
+            }
+
+            const existingRows = await project_financing_sources.findAll({ where: { project_id: projectId } });
+            const existingIds = new Set(existingRows.map((r) => r.id));
+            const excelIds = new Set(validRows.filter((r) => r.id).map((r) => r.id));
+
+            let processed = 0;
+
+            // DELETE rows not in Excel
+            for (const existing of existingRows) {
+                if (!excelIds.has(existing.id)) {
+                    await project_financing_sources.destroy({ where: { id: existing.id } });
+                }
+            }
+
+            // UPDATE and INSERT
+            for (const row of validRows) {
+                try {
+                    if (row.id && existingIds.has(row.id)) {
+                        await project_financing_sources.update(
+                            { financing_source_id: row.financing_source_id, amount: row.amount, description: row.description },
+                            { where: { id: row.id, project_id: projectId } }
+                        );
+                    } else {
+                        await project_financing_sources.create({
+                            project_id: projectId,
+                            financing_source_id: row.financing_source_id,
+                            amount: row.amount,
+                            description: row.description,
+                        });
+                    }
+                    processed++;
+                } catch (err) {
+                    errors.push({ row: validRows.indexOf(row) + 2, message: err.message });
+                }
+            }
+
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Importó fuentes de financiamiento por Excel para proyecto ID: ${projectId} (${processed} procesados, ${errors.length} errores)`,
+            });
+
+            res.status(200).json({ ok: true, processed, errors: errors.length, errorDetails: errors });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Download donations template
+router.get("/project/:projectId/excel/donations", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId } = req.params;
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+
+            const rows = await project_donations.findAll({ where: { project_id: projectId } });
+
+            const wb = generateDonationsExcel(rows);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            res.setHeader("Content-Disposition", "attachment; filename=plantilla-donaciones.xlsx");
+            return wb.write("plantilla-donaciones.xlsx", res);
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Process donations Excel
+router.post("/project/:projectId/excel/donations", verify_token, is_supervisor, excelUpload.single("file"),
+    async (req, res, next) => {
+        try {
+            const { projectId } = req.params;
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
+
+            const { parsed, errors } = parseDonationsExcel(req.file.buffer);
+
+            const existingRows = await project_donations.findAll({ where: { project_id: projectId } });
+            const existingIds = new Set(existingRows.map((r) => r.id));
+            const excelIds = new Set(parsed.filter((r) => r.id).map((r) => r.id));
+
+            let processed = 0;
+
+            // DELETE rows not in Excel
+            for (const existing of existingRows) {
+                if (!excelIds.has(existing.id)) {
+                    await project_donations.destroy({ where: { id: existing.id } });
+                }
+            }
+
+            // UPDATE and INSERT
+            for (const row of parsed) {
+                try {
+                    if (row.id && existingIds.has(row.id)) {
+                        await project_donations.update(
+                            { amount: row.amount, description: row.description, donation_type: row.donation_type },
+                            { where: { id: row.id, project_id: projectId } }
+                        );
+                    } else {
+                        await project_donations.create({
+                            project_id: projectId,
+                            amount: row.amount,
+                            description: row.description,
+                            donation_type: row.donation_type,
+                        });
+                    }
+                    processed++;
+                } catch (err) {
+                    errors.push({ row: parsed.indexOf(row) + 2, message: err.message });
+                }
+            }
+
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Importó donaciones por Excel para proyecto ID: ${projectId} (${processed} procesados, ${errors.length} errores)`,
+            });
+
+            res.status(200).json({ ok: true, processed, errors: errors.length, errorDetails: errors });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Download expenses template
+router.get("/project/:projectId/excel/expenses", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { projectId } = req.params;
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+
+            const rows = await project_expenses.findAll({ where: { project_id: projectId } });
+
+            const wb = generateExpensesExcel(rows);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            res.setHeader("Content-Disposition", "attachment; filename=plantilla-gastos.xlsx");
+            return wb.write("plantilla-gastos.xlsx", res);
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Process expenses Excel
+router.post("/project/:projectId/excel/expenses", verify_token, is_supervisor, excelUpload.single("file"),
+    async (req, res, next) => {
+        try {
+            const { projectId } = req.params;
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
+
+            const { parsed, errors } = parseExpensesExcel(req.file.buffer);
+
+            const existingRows = await project_expenses.findAll({ where: { project_id: projectId } });
+            const existingIds = new Set(existingRows.map((r) => r.id));
+            const excelIds = new Set(parsed.filter((r) => r.id).map((r) => r.id));
+
+            let processed = 0;
+
+            // DELETE rows not in Excel
+            for (const existing of existingRows) {
+                if (!excelIds.has(existing.id)) {
+                    await project_expenses.destroy({ where: { id: existing.id } });
+                }
+            }
+
+            // UPDATE and INSERT
+            for (const row of parsed) {
+                try {
+                    if (row.id && existingIds.has(row.id)) {
+                        await project_expenses.update(
+                            { amount: row.amount, description: row.description },
+                            { where: { id: row.id, project_id: projectId } }
+                        );
+                    } else {
+                        await project_expenses.create({
+                            project_id: projectId,
+                            amount: row.amount,
+                            description: row.description,
+                        });
+                    }
+                    processed++;
+                } catch (err) {
+                    errors.push({ row: parsed.indexOf(row) + 2, message: err.message });
+                }
+            }
+
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Importó gastos por Excel para proyecto ID: ${projectId} (${processed} procesados, ${errors.length} errores)`,
+            });
+
+            res.status(200).json({ ok: true, processed, errors: errors.length, errorDetails: errors });
         } catch (e) {
             next(e);
         }
