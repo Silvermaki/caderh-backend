@@ -144,6 +144,11 @@ export const projects = sequelize.define('projects', {
         allowNull: false,
         defaultValue: Sequelize.literal("'[]'")
     },
+    project_status: {
+        type: DataTypes.ENUM('ACTIVE', 'DELETED', 'ARCHIVED'),
+        allowNull: false,
+        defaultValue: 'ACTIVE',
+    },
     created_dt: {
         type: DataTypes.DATE,
         allowNull: false,

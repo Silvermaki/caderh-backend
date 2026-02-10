@@ -150,16 +150,22 @@ router.delete('/financing-source', verify_token, is_supervisor,
 router.get("/projects", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
-            const { limit, offset, sort, desc, search } = req.query;
+            const { limit, offset, sort, desc, search, status } = req.query;
             if (!limit || limit > 100) return res.status(400).json({ message: "Faltan campos requeridos" });
 
-            const where = search
-                ? { [Op.or]: { name: { [Op.iLike]: `%${search}%` }, description: { [Op.iLike]: `%${search}%` } } }
-                : undefined;
+            const VALID_STATUSES = ["ACTIVE", "ARCHIVED"];
+            const statusFilter = VALID_STATUSES.includes(status) ? status : "ACTIVE";
+
+            const where = {
+                project_status: statusFilter,
+                ...(search
+                    ? { [Op.or]: { name: { [Op.iLike]: `%${search}%` }, description: { [Op.iLike]: `%${search}%` } } }
+                    : {}),
+            };
 
             const result = await projects.findAndCountAll({
                 attributes: [
-                    "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "created_dt",
+                    "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "created_dt",
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
@@ -181,29 +187,17 @@ router.get("/projects", verify_token, is_supervisor,
     }
 );
 
-// Delete project
+// Delete project (soft delete)
 router.delete("/projects/:id", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
             const { id } = req.params;
             const project = await projects.findOne({ where: { id } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
-            const projectId = id;
-            const files = await project_files.findAll({ where: { project_id: projectId } });
-            for (const pf of files) {
-                const fullPath = path.join(__dirname, "../../files", pf.file);
-                if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
-            }
-            await project_files.destroy({ where: { project_id: projectId } });
-            await project_expenses.destroy({ where: { project_id: projectId } });
-            await project_donations.destroy({ where: { project_id: projectId } });
-            await project_financing_sources.destroy({ where: { project_id: projectId } });
-            await project_beneficiaries.destroy({ where: { project_id: projectId } });
-            await project_logs.destroy({ where: { project_id: projectId } });
-            await projects.destroy({ where: { id } });
+            await projects.update({ project_status: 'DELETED' }, { where: { id } });
             await user_logs.create({
                 user_id: req.user_id,
-                log: `Eliminó proyecto ID: ${projectId}, NOMBRE: ${project.name}`,
+                log: `Eliminó proyecto ID: ${id}, NOMBRE: ${project.name}`,
             });
             res.status(200).json({ ok: true });
         } catch (e) {
@@ -220,7 +214,7 @@ router.get("/projects/:id", verify_token, is_supervisor,
             const project = await projects.findOne({
                 where: { id },
                 attributes: [
-                    "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "created_dt",
+                    "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "created_dt",
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
@@ -230,7 +224,7 @@ router.get("/projects/:id", verify_token, is_supervisor,
                     )`), "total_expenses"],
                 ],
             });
-            if (!project) {
+            if (!project || project.project_status === 'DELETED') {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
             res.status(200).json({ data: project });
@@ -260,6 +254,27 @@ router.patch("/projects/:id/accomplishments", verify_token, is_supervisor,
             await user_logs.create({
                 user_id: req.user_id,
                 log: `Actualizó logros del proyecto ID: ${id}`,
+            });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Archive project
+router.patch("/projects/:id/archive", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const project = await projects.findOne({ where: { id } });
+            if (!project || project.project_status === 'DELETED') {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+            await projects.update({ project_status: 'ARCHIVED' }, { where: { id } });
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Archivó proyecto ID: ${id}, NOMBRE: ${project.name}`,
             });
             res.status(200).json({ ok: true });
         } catch (e) {
@@ -316,7 +331,7 @@ router.post("/project/wizard/step1", verify_token, is_supervisor,
                 return res.status(200).json({ project_id: project_id });
             }
 
-            const project = await projects.create(payload);
+            const project = await projects.create({ ...payload, project_status: 'ACTIVE' });
             await user_logs.create({
                 user_id: req.user_id,
                 log: `Creó proyecto ID: ${project.id}, NOMBRE: ${project.name}`,
