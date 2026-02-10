@@ -34,7 +34,7 @@ export function generateFinancingSourcesExcel(rows, allSources) {
     const ws = wb.addWorksheet("Fuentes de Financiamiento");
     const hStyle = headerStyle(wb);
 
-    const headers = ["id", "financing_source_id", "fuente_nombre", "monto", "descripcion"];
+    const headers = ["ID", "Fuente ID", "Fuente Nombre", "Monto", "Descripcion"];
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(hStyle));
 
     // Column widths
@@ -58,7 +58,7 @@ export function generateFinancingSourcesExcel(rows, allSources) {
     // Auxiliary sheet: available sources
     if (allSources && allSources.length > 0) {
         const ws2 = wb.addWorksheet("Fuentes Disponibles");
-        const headers2 = ["financing_source_id", "nombre"];
+        const headers2 = ["Fuente ID", "Nombre"];
         headers2.forEach((h, i) => ws2.cell(1, i + 1).string(h).style(hStyle));
         ws2.column(1).setWidth(38);
         ws2.column(2).setWidth(30);
@@ -78,7 +78,7 @@ export function generateDonationsExcel(rows) {
     const ws = wb.addWorksheet("Donaciones");
     const hStyle = headerStyle(wb);
 
-    const headers = ["id", "monto", "descripcion", "tipo"];
+    const headers = ["ID", "Monto", "Descripcion", "Tipo"];
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(hStyle));
 
     ws.column(1).setWidth(38);
@@ -94,6 +94,17 @@ export function generateDonationsExcel(rows) {
         ws.cell(row, 4).string(DONATION_TYPE_DISPLAY[r.donation_type] ?? "EFECTIVO");
     });
 
+    // Auxiliary sheet: donation types
+    const ws2 = wb.addWorksheet("Tipos de Donacion");
+    const headers2 = ["Tipo", "Descripcion"];
+    headers2.forEach((h, i) => ws2.cell(1, i + 1).string(h).style(hStyle));
+    ws2.column(1).setWidth(18);
+    ws2.column(2).setWidth(40);
+    ws2.cell(2, 1).string("EFECTIVO");
+    ws2.cell(2, 2).string("Donacion en efectivo");
+    ws2.cell(3, 1).string("SUMINISTROS");
+    ws2.cell(3, 2).string("Donacion en especie / suministros");
+
     return wb;
 }
 
@@ -104,7 +115,7 @@ export function generateExpensesExcel(rows) {
     const ws = wb.addWorksheet("Gastos");
     const hStyle = headerStyle(wb);
 
-    const headers = ["id", "monto", "descripcion"];
+    const headers = ["ID", "Monto", "Descripcion"];
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(hStyle));
 
     ws.column(1).setWidth(38);
@@ -133,17 +144,17 @@ export function parseFinancingSourcesExcel(buffer) {
 
     jsonRows.forEach((row, idx) => {
         const rowNum = idx + 2; // 1-indexed, skip header
-        const id = String(row.id ?? "").trim();
-        const financing_source_id = String(row.financing_source_id ?? "").trim();
-        const monto = Number(row.monto);
-        const description = String(row.descripcion ?? "").trim();
+        const id = String(row["ID"] ?? "").trim();
+        const financing_source_id = String(row["Fuente ID"] ?? "").trim();
+        const monto = Number(row["Monto"]);
+        const description = String(row["Descripcion"] ?? "").trim();
 
         if (!financing_source_id) {
-            errors.push({ row: rowNum, message: "financing_source_id es requerido" });
+            errors.push({ row: rowNum, message: "Fuente ID es requerido" });
             return;
         }
         if (!UUID_RE.test(financing_source_id)) {
-            errors.push({ row: rowNum, message: "financing_source_id no es un UUID válido" });
+            errors.push({ row: rowNum, message: "Fuente ID no es un UUID válido" });
             return;
         }
         if (isNaN(monto)) {
@@ -178,18 +189,18 @@ export function parseDonationsExcel(buffer) {
 
     jsonRows.forEach((row, idx) => {
         const rowNum = idx + 2;
-        const id = String(row.id ?? "").trim();
-        const monto = Number(row.monto);
-        const description = String(row.descripcion ?? "").trim();
-        const tipoRaw = String(row.tipo ?? "").trim().toUpperCase();
+        const id = String(row["ID"] ?? "").trim();
+        const monto = Number(row["Monto"]);
+        const description = String(row["Descripcion"] ?? "").trim();
+        const tipoRaw = String(row["Tipo"] ?? "").trim().toUpperCase();
         const donation_type = DONATION_TYPE_MAP[tipoRaw];
 
         if (isNaN(monto)) {
-            errors.push({ row: rowNum, message: "monto inválido" });
+            errors.push({ row: rowNum, message: "Monto inválido" });
             return;
         }
         if (!donation_type) {
-            errors.push({ row: rowNum, message: `tipo inválido: "${row.tipo}". Use EFECTIVO o SUMINISTROS` });
+            errors.push({ row: rowNum, message: `Tipo inválido: "${row["Tipo"]}". Use EFECTIVO o SUMINISTROS` });
             return;
         }
         if (id && !UUID_RE.test(id)) {
@@ -220,12 +231,12 @@ export function parseExpensesExcel(buffer) {
 
     jsonRows.forEach((row, idx) => {
         const rowNum = idx + 2;
-        const id = String(row.id ?? "").trim();
-        const monto = Number(row.monto);
-        const description = String(row.descripcion ?? "").trim();
+        const id = String(row["ID"] ?? "").trim();
+        const monto = Number(row["Monto"]);
+        const description = String(row["Descripcion"] ?? "").trim();
 
         if (isNaN(monto)) {
-            errors.push({ row: rowNum, message: "monto inválido" });
+            errors.push({ row: rowNum, message: "Monto inválido" });
             return;
         }
         if (id && !UUID_RE.test(id)) {
