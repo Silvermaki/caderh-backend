@@ -262,7 +262,7 @@ router.patch("/projects/:id/accomplishments", verify_token, is_supervisor,
     }
 );
 
-// Archive project
+// Archive / Unarchive project (toggle)
 router.patch("/projects/:id/archive", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
@@ -271,12 +271,14 @@ router.patch("/projects/:id/archive", verify_token, is_supervisor,
             if (!project || project.project_status === 'DELETED') {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
-            await projects.update({ project_status: 'ARCHIVED' }, { where: { id } });
+            const newStatus = project.project_status === 'ARCHIVED' ? 'ACTIVE' : 'ARCHIVED';
+            await projects.update({ project_status: newStatus }, { where: { id } });
+            const action = newStatus === 'ARCHIVED' ? 'Archivó' : 'Desarchivó';
             await user_logs.create({
                 user_id: req.user_id,
-                log: `Archivó proyecto ID: ${id}, NOMBRE: ${project.name}`,
+                log: `${action} proyecto ID: ${id}, NOMBRE: ${project.name}`,
             });
-            res.status(200).json({ ok: true });
+            res.status(200).json({ ok: true, project_status: newStatus });
         } catch (e) {
             next(e);
         }
