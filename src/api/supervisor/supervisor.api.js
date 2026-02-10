@@ -180,6 +180,9 @@ router.get("/projects", verify_token, is_supervisor,
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_expenses WHERE project_id = "projects".id), 0)
                     ) / 100.0`), "total_expenses"],
+                    [sequelize.literal(`(
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'SUPPLY'), 0)
+                    ) / 100.0`), "in_kind_donations"],
                 ],
                 where,
                 order: sort ? [[sort, desc]] : undefined,
@@ -229,6 +232,9 @@ router.get("/projects/:id", verify_token, is_supervisor,
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_expenses WHERE project_id = "projects".id), 0)
                     ) / 100.0`), "total_expenses"],
+                    [sequelize.literal(`(
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'SUPPLY'), 0)
+                    ) / 100.0`), "in_kind_donations"],
                 ],
             });
             if (!project || project.project_status === 'DELETED') {
