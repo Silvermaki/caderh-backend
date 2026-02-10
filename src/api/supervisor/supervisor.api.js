@@ -169,10 +169,10 @@ router.get("/projects", verify_token, is_supervisor,
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
-                    )`), "financed_amount"],
+                    ) / 100.0`), "financed_amount"],
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_expenses WHERE project_id = "projects".id), 0)
-                    )`), "total_expenses"],
+                    ) / 100.0`), "total_expenses"],
                 ],
                 where,
                 order: sort ? [[sort, desc]] : undefined,
@@ -218,10 +218,10 @@ router.get("/projects/:id", verify_token, is_supervisor,
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
-                    )`), "financed_amount"],
+                    ) / 100.0`), "financed_amount"],
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_expenses WHERE project_id = "projects".id), 0)
-                    )`), "total_expenses"],
+                    ) / 100.0`), "total_expenses"],
                 ],
             });
             if (!project || project.project_status === 'DELETED') {
@@ -363,7 +363,7 @@ router.get("/project/wizard/step2/:projectId", verify_token, is_supervisor,
             const data = rows.map((r) => ({
                 id: r.id,
                 financing_source_id: r.financing_source_id,
-                amount: r.amount,
+                amount: Number(r.amount) / 100,
                 description: r.description,
                 financing_source_name: sourceMap[r.financing_source_id] ?? null,
             }));
@@ -403,7 +403,7 @@ router.put("/project/wizard/step2/:projectId", verify_token, is_supervisor,
                     arr.map((i) => ({
                         project_id: projectId,
                         financing_source_id: i.financing_source_id,
-                        amount: Number(i.amount),
+                        amount: Math.round(Number(i.amount) * 100),
                         description: (i.description ?? "").toString(),
                     }))
                 );
@@ -430,10 +430,17 @@ router.get("/project/wizard/step3/:projectId", verify_token, is_supervisor,
             if (!project) {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
-            const data = await project_donations.findAll({
+            const rows = await project_donations.findAll({
                 where: { project_id: projectId },
                 attributes: ["id", "amount", "description", "donation_type", "created_dt"],
             });
+            const data = rows.map((r) => ({
+                id: r.id,
+                amount: Number(r.amount) / 100,
+                description: r.description,
+                donation_type: r.donation_type,
+                created_dt: r.created_dt,
+            }));
             res.status(200).json({ data });
         } catch (e) {
             next(e);
@@ -466,7 +473,7 @@ router.put("/project/wizard/step3/:projectId", verify_token, is_supervisor,
                 await project_donations.bulkCreate(
                     arr.map((i) => ({
                         project_id: projectId,
-                        amount: Number(i.amount),
+                        amount: Math.round(Number(i.amount) * 100),
                         description: (i.description ?? "").toString(),
                         donation_type: i.donation_type,
                     }))
@@ -494,10 +501,15 @@ router.get("/project/wizard/step4/:projectId", verify_token, is_supervisor,
             if (!project) {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
-            const data = await project_expenses.findAll({
+            const rows = await project_expenses.findAll({
                 where: { project_id: projectId },
                 attributes: ["id", "amount", "description"],
             });
+            const data = rows.map((r) => ({
+                id: r.id,
+                amount: Number(r.amount) / 100,
+                description: r.description,
+            }));
             res.status(200).json({ data });
         } catch (e) {
             next(e);
@@ -529,7 +541,7 @@ router.put("/project/wizard/step4/:projectId", verify_token, is_supervisor,
                 await project_expenses.bulkCreate(
                     arr.map((i) => ({
                         project_id: projectId,
-                        amount: Number(i.amount),
+                        amount: Math.round(Number(i.amount) * 100),
                         description: (i.description ?? "").toString(),
                     }))
                 );
@@ -685,7 +697,7 @@ router.post("/project/:projectId/financing-source", verify_token, is_supervisor,
             const row = await project_financing_sources.create({
                 project_id: projectId,
                 financing_source_id,
-                amount: Number(amount),
+                amount: Math.round(Number(amount) * 100),
                 description: (description ?? "").toString(),
             });
             await user_logs.create({
@@ -732,7 +744,7 @@ router.post("/project/:projectId/donation", verify_token, is_supervisor,
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
             const row = await project_donations.create({
                 project_id: projectId,
-                amount: Number(amount),
+                amount: Math.round(Number(amount) * 100),
                 description: (description ?? "").toString(),
                 donation_type,
             });
@@ -779,7 +791,7 @@ router.post("/project/:projectId/expense", verify_token, is_supervisor,
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
             const row = await project_expenses.create({
                 project_id: projectId,
-                amount: Number(amount),
+                amount: Math.round(Number(amount) * 100),
                 description: (description ?? "").toString(),
             });
             await user_logs.create({
