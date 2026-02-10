@@ -705,7 +705,8 @@ router.get("/project/:projectId/excel/financing-sources", verify_token, is_super
             const rows = await project_financing_sources.findAll({ where: { project_id: projectId } });
             const allSources = await financing_sources.findAll({ attributes: ["id", "name"] });
 
-            const wb = generateFinancingSourcesExcel(rows, allSources);
+            const includeId = req.query.includeIds !== '0';
+            const wb = generateFinancingSourcesExcel(rows, allSources, { includeId });
             res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
             res.setHeader("Content-Disposition", "attachment; filename=plantilla-fuentes.xlsx");
             return wb.write("plantilla-fuentes.xlsx", res);
@@ -795,7 +796,8 @@ router.get("/project/:projectId/excel/donations", verify_token, is_supervisor,
 
             const rows = await project_donations.findAll({ where: { project_id: projectId } });
 
-            const wb = generateDonationsExcel(rows);
+            const includeId = req.query.includeIds !== '0';
+            const wb = generateDonationsExcel(rows, { includeId });
             res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
             res.setHeader("Content-Disposition", "attachment; filename=plantilla-donaciones.xlsx");
             return wb.write("plantilla-donaciones.xlsx", res);
@@ -873,7 +875,8 @@ router.get("/project/:projectId/excel/expenses", verify_token, is_supervisor,
 
             const rows = await project_expenses.findAll({ where: { project_id: projectId } });
 
-            const wb = generateExpensesExcel(rows);
+            const includeId = req.query.includeIds !== '0';
+            const wb = generateExpensesExcel(rows, { includeId });
             res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
             res.setHeader("Content-Disposition", "attachment; filename=plantilla-gastos.xlsx");
             return wb.write("plantilla-gastos.xlsx", res);

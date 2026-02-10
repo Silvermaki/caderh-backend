@@ -29,30 +29,47 @@ function headerStyle(wb) {
 
 // ─── GENERATE: Financing Sources ────────────────────────────────────────────
 
-export function generateFinancingSourcesExcel(rows, allSources) {
+export function generateFinancingSourcesExcel(rows, allSources, options = {}) {
+    const includeId = options.includeId !== false;
     const wb = new xl.Workbook();
     const ws = wb.addWorksheet("Fuentes de Financiamiento");
     const hStyle = headerStyle(wb);
 
-    const headers = ["ID", "Fuente ID", "Fuente Nombre", "Monto", "Descripcion"];
+    const headers = includeId
+        ? ["ID", "Fuente ID", "Fuente Nombre", "Monto", "Descripcion"]
+        : ["Fuente ID", "Fuente Nombre", "Monto", "Descripcion"];
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(hStyle));
 
     // Column widths
-    ws.column(1).setWidth(38);
-    ws.column(2).setWidth(38);
-    ws.column(3).setWidth(30);
-    ws.column(4).setWidth(18);
-    ws.column(5).setWidth(30);
+    if (includeId) {
+        ws.column(1).setWidth(38);
+        ws.column(2).setWidth(38);
+        ws.column(3).setWidth(30);
+        ws.column(4).setWidth(18);
+        ws.column(5).setWidth(30);
+    } else {
+        ws.column(1).setWidth(38);
+        ws.column(2).setWidth(30);
+        ws.column(3).setWidth(18);
+        ws.column(4).setWidth(30);
+    }
 
     const sourceMap = Object.fromEntries((allSources ?? []).map((s) => [s.id, s.name]));
 
     rows.forEach((r, idx) => {
         const row = idx + 2;
-        ws.cell(row, 1).string(r.id ?? "");
-        ws.cell(row, 2).string(r.financing_source_id ?? "");
-        ws.cell(row, 3).string(sourceMap[r.financing_source_id] ?? "");
-        ws.cell(row, 4).number(Number(r.amount ?? 0) / 100);
-        ws.cell(row, 5).string(r.description ?? "");
+        if (includeId) {
+            ws.cell(row, 1).string(r.id ?? "");
+            ws.cell(row, 2).string(r.financing_source_id ?? "");
+            ws.cell(row, 3).string(sourceMap[r.financing_source_id] ?? "");
+            ws.cell(row, 4).number(Number(r.amount ?? 0) / 100);
+            ws.cell(row, 5).string(r.description ?? "");
+        } else {
+            ws.cell(row, 1).string(r.financing_source_id ?? "");
+            ws.cell(row, 2).string(sourceMap[r.financing_source_id] ?? "");
+            ws.cell(row, 3).number(Number(r.amount ?? 0) / 100);
+            ws.cell(row, 4).string(r.description ?? "");
+        }
     });
 
     // Auxiliary sheet: available sources
@@ -73,25 +90,40 @@ export function generateFinancingSourcesExcel(rows, allSources) {
 
 // ─── GENERATE: Donations ────────────────────────────────────────────────────
 
-export function generateDonationsExcel(rows) {
+export function generateDonationsExcel(rows, options = {}) {
+    const includeId = options.includeId !== false;
     const wb = new xl.Workbook();
     const ws = wb.addWorksheet("Donaciones");
     const hStyle = headerStyle(wb);
 
-    const headers = ["ID", "Monto", "Descripcion", "Tipo"];
+    const headers = includeId
+        ? ["ID", "Monto", "Descripcion", "Tipo"]
+        : ["Monto", "Descripcion", "Tipo"];
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(hStyle));
 
-    ws.column(1).setWidth(38);
-    ws.column(2).setWidth(18);
-    ws.column(3).setWidth(30);
-    ws.column(4).setWidth(18);
+    if (includeId) {
+        ws.column(1).setWidth(38);
+        ws.column(2).setWidth(18);
+        ws.column(3).setWidth(30);
+        ws.column(4).setWidth(18);
+    } else {
+        ws.column(1).setWidth(18);
+        ws.column(2).setWidth(30);
+        ws.column(3).setWidth(18);
+    }
 
     rows.forEach((r, idx) => {
         const row = idx + 2;
-        ws.cell(row, 1).string(r.id ?? "");
-        ws.cell(row, 2).number(Number(r.amount ?? 0) / 100);
-        ws.cell(row, 3).string(r.description ?? "");
-        ws.cell(row, 4).string(DONATION_TYPE_DISPLAY[r.donation_type] ?? "EFECTIVO");
+        if (includeId) {
+            ws.cell(row, 1).string(r.id ?? "");
+            ws.cell(row, 2).number(Number(r.amount ?? 0) / 100);
+            ws.cell(row, 3).string(r.description ?? "");
+            ws.cell(row, 4).string(DONATION_TYPE_DISPLAY[r.donation_type] ?? "EFECTIVO");
+        } else {
+            ws.cell(row, 1).number(Number(r.amount ?? 0) / 100);
+            ws.cell(row, 2).string(r.description ?? "");
+            ws.cell(row, 3).string(DONATION_TYPE_DISPLAY[r.donation_type] ?? "EFECTIVO");
+        }
     });
 
     // Auxiliary sheet: donation types
@@ -110,23 +142,36 @@ export function generateDonationsExcel(rows) {
 
 // ─── GENERATE: Expenses ─────────────────────────────────────────────────────
 
-export function generateExpensesExcel(rows) {
+export function generateExpensesExcel(rows, options = {}) {
+    const includeId = options.includeId !== false;
     const wb = new xl.Workbook();
     const ws = wb.addWorksheet("Gastos");
     const hStyle = headerStyle(wb);
 
-    const headers = ["ID", "Monto", "Descripcion"];
+    const headers = includeId
+        ? ["ID", "Monto", "Descripcion"]
+        : ["Monto", "Descripcion"];
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(hStyle));
 
-    ws.column(1).setWidth(38);
-    ws.column(2).setWidth(18);
-    ws.column(3).setWidth(30);
+    if (includeId) {
+        ws.column(1).setWidth(38);
+        ws.column(2).setWidth(18);
+        ws.column(3).setWidth(30);
+    } else {
+        ws.column(1).setWidth(18);
+        ws.column(2).setWidth(30);
+    }
 
     rows.forEach((r, idx) => {
         const row = idx + 2;
-        ws.cell(row, 1).string(r.id ?? "");
-        ws.cell(row, 2).number(Number(r.amount ?? 0) / 100);
-        ws.cell(row, 3).string(r.description ?? "");
+        if (includeId) {
+            ws.cell(row, 1).string(r.id ?? "");
+            ws.cell(row, 2).number(Number(r.amount ?? 0) / 100);
+            ws.cell(row, 3).string(r.description ?? "");
+        } else {
+            ws.cell(row, 1).number(Number(r.amount ?? 0) / 100);
+            ws.cell(row, 2).string(r.description ?? "");
+        }
     });
 
     return wb;
