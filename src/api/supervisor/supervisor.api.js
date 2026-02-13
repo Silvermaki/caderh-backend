@@ -1,7 +1,7 @@
 import { Router } from "express";
 import path from "path";
 import fs from "fs";
-import { sequelize, users, user_logs, financing_sources, projects, project_financing_sources, project_donations, project_expenses, project_files, project_beneficiaries, project_logs } from "../../utils/sequelize.js";
+import { sequelize, users, user_logs, financing_sources, projects, project_financing_sources, project_donations, project_expenses, project_files, project_beneficiaries, project_logs, expense_categories } from "../../utils/sequelize.js";
 import { projectFileUpload, buildProjectFilePath } from "../../utils/upload.js";
 import { verify_token, is_supervisor } from "../../utils/token.js";
 import { Op } from "sequelize";
@@ -172,7 +172,7 @@ router.get("/projects", verify_token, is_supervisor,
 
             const result = await projects.findAndCountAll({
                 attributes: [
-                    "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "created_dt",
+                    "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "project_category", "created_dt",
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
@@ -183,6 +183,9 @@ router.get("/projects", verify_token, is_supervisor,
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'SUPPLY'), 0)
                     ) / 100.0`), "in_kind_donations"],
+                    [sequelize.literal(`(
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
+                    ) / 100.0`), "cash_donations"],
                 ],
                 where,
                 order: sort ? [[sort, desc]] : undefined,
@@ -224,7 +227,7 @@ router.get("/projects/:id", verify_token, is_supervisor,
             const project = await projects.findOne({
                 where: { id },
                 attributes: [
-                    "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "created_dt",
+                    "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "project_category", "created_dt",
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
@@ -235,6 +238,9 @@ router.get("/projects/:id", verify_token, is_supervisor,
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'SUPPLY'), 0)
                     ) / 100.0`), "in_kind_donations"],
+                    [sequelize.literal(`(
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
+                    ) / 100.0`), "cash_donations"],
                 ],
             });
             if (!project || project.project_status === 'DELETED') {
@@ -304,7 +310,8 @@ router.patch("/projects/:id/archive", verify_token, is_supervisor,
 router.post("/project/wizard/step1", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
-            const { project_id, name, description, objectives, start_date, end_date, accomplishments } = req.body;
+            const { project_id, name, description, objectives, start_date, end_date, accomplishments, project_category } = req.body;
+            const VALID_CATEGORIES = ["PROJECT", "AGREEMENT"];
             if (!name || !description || !objectives || !start_date || !end_date) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
@@ -331,6 +338,7 @@ router.post("/project/wizard/step1", verify_token, is_supervisor,
                 start_date,
                 end_date,
                 accomplishments: accomplishmentsArr,
+                ...(project_category && VALID_CATEGORIES.includes(project_category) ? { project_category } : {}),
             };
 
             if (project_id && String(project_id).trim()) {
@@ -468,7 +476,7 @@ router.put("/project/wizard/step3/:projectId", verify_token, is_supervisor,
             const { projectId } = req.params;
             const { items } = req.body ?? {};
             const arr = Array.isArray(items) ? items : [];
-            const VALID_TYPES = ["CASH", "SUPPLY"];
+            const VALID_TYPES = ["CASH", "SUPPLY", "BENEFIT"];
 
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) {
@@ -477,7 +485,7 @@ router.put("/project/wizard/step3/:projectId", verify_token, is_supervisor,
 
             for (const i of arr) {
                 if ((typeof i.amount !== "number" && typeof i.amount !== "string") || !VALID_TYPES.includes(i.donation_type)) {
-                    return res.status(400).json({ message: "Cada item debe tener amount y donation_type (CASH o SUPPLY)" });
+                    return res.status(400).json({ message: "Cada item debe tener amount y donation_type (CASH, SUPPLY o BENEFIT)" });
                 }
             }
 
@@ -516,12 +524,13 @@ router.get("/project/wizard/step4/:projectId", verify_token, is_supervisor,
             }
             const rows = await project_expenses.findAll({
                 where: { project_id: projectId },
-                attributes: ["id", "amount", "description"],
+                attributes: ["id", "amount", "description", "expense_category_id"],
             });
             const data = rows.map((r) => ({
                 id: r.id,
                 amount: Number(r.amount) / 100,
                 description: r.description,
+                expense_category_id: r.expense_category_id ?? null,
             }));
             res.status(200).json({ data });
         } catch (e) {
@@ -556,6 +565,7 @@ router.put("/project/wizard/step4/:projectId", verify_token, is_supervisor,
                         project_id: projectId,
                         amount: Math.round(Number(i.amount) * 100),
                         description: (i.description ?? "").toString(),
+                        expense_category_id: i.expense_category_id || null,
                     }))
                 );
             }
@@ -1000,9 +1010,9 @@ router.post("/project/:projectId/donation", verify_token, is_supervisor,
         try {
             const { projectId } = req.params;
             const { amount, donation_type, description } = req.body ?? {};
-            const VALID_TYPES = ["CASH", "SUPPLY"];
+            const VALID_TYPES = ["CASH", "SUPPLY", "BENEFIT"];
             if ((typeof amount !== "number" && typeof amount !== "string") || !VALID_TYPES.includes(donation_type)) {
-                return res.status(400).json({ message: "Se requieren amount y donation_type (CASH o SUPPLY)" });
+                return res.status(400).json({ message: "Se requieren amount y donation_type (CASH, SUPPLY o BENEFIT)" });
             }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
@@ -1047,7 +1057,7 @@ router.post("/project/:projectId/expense", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
-            const { amount, description } = req.body ?? {};
+            const { amount, description, expense_category_id } = req.body ?? {};
             if (typeof amount !== "number" && typeof amount !== "string") {
                 return res.status(400).json({ message: "Se requiere amount" });
             }
@@ -1057,6 +1067,7 @@ router.post("/project/:projectId/expense", verify_token, is_supervisor,
                 project_id: projectId,
                 amount: Math.round(Number(amount) * 100),
                 description: (description ?? "").toString(),
+                expense_category_id: expense_category_id || null,
             });
             await user_logs.create({
                 user_id: req.user_id,
@@ -1080,6 +1091,71 @@ router.delete("/project/:projectId/expense/:id", verify_token, is_supervisor,
             await user_logs.create({
                 user_id: req.user_id,
                 log: `Eliminó gasto del proyecto ID: ${projectId}`,
+            });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Expense Categories CRUD ────────────────────────────────────────────────
+
+// List all expense categories
+router.get("/expense-categories", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const rows = await expense_categories.findAll({
+                attributes: ["id", "name", "created_dt"],
+                order: [["name", "ASC"]],
+            });
+            res.status(200).json({ data: rows });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Create expense category
+router.post("/expense-categories", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { name } = req.body ?? {};
+            if (!name || typeof name !== "string" || name.trim().length < 1) {
+                return res.status(400).json({ message: "Se requiere un nombre válido" });
+            }
+            const existing = await expense_categories.findOne({ where: { name: name.trim() } });
+            if (existing) {
+                return res.status(409).json({ message: "Ya existe una categoría con ese nombre" });
+            }
+            const row = await expense_categories.create({ name: name.trim() });
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Creó categoría de gasto: ${name.trim()}`,
+            });
+            res.status(201).json({ ok: true, id: row.id, name: row.name });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Delete expense category
+router.delete("/expense-categories/:id", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const cat = await expense_categories.findOne({ where: { id } });
+            if (!cat) return res.status(404).json({ message: "Categoría no encontrada" });
+            // Nullify references in project_expenses
+            await project_expenses.update(
+                { expense_category_id: null },
+                { where: { expense_category_id: id } }
+            );
+            await expense_categories.destroy({ where: { id } });
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Eliminó categoría de gasto: ${cat.name}`,
             });
             res.status(200).json({ ok: true });
         } catch (e) {

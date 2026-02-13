@@ -149,6 +149,11 @@ export const projects = sequelize.define('projects', {
         allowNull: false,
         defaultValue: 'ACTIVE',
     },
+    project_category: {
+        type: DataTypes.ENUM('PROJECT', 'AGREEMENT'),
+        allowNull: false,
+        defaultValue: 'PROJECT',
+    },
     created_dt: {
         type: DataTypes.DATE,
         allowNull: false,
@@ -256,12 +261,39 @@ export const project_expenses = sequelize.define('project_expenses', {
         allowNull: false,
         defaultValue: ''
     },
+    expense_category_id: {
+        type: DataTypes.UUID,
+        allowNull: true,
+        references: {
+            model: 'expense_categories',
+            key: 'id'
+        }
+    },
     created_dt: {
         type: DataTypes.DATE,
         allowNull: false,
         defaultValue: Sequelize.literal('now()::timestamp')
     }
 }, { freezeTableName: true, timestamps: false, schema: "caderh", tableName: "project_expenses" });
+
+export const expense_categories = sequelize.define('expense_categories', {
+    id: {
+        type: DataTypes.UUID,
+        primaryKey: true,
+        allowNull: false,
+        defaultValue: Sequelize.literal('gen_random_uuid()')
+    },
+    name: {
+        type: DataTypes.TEXT,
+        allowNull: false,
+        unique: true,
+    },
+    created_dt: {
+        type: DataTypes.DATE,
+        allowNull: false,
+        defaultValue: Sequelize.literal('now()::timestamp')
+    }
+}, { freezeTableName: true, timestamps: false, schema: "caderh", tableName: "expense_categories" });
 
 export const project_beneficiaries = sequelize.define('project_beneficiaries', {
     id: {

@@ -8,13 +8,16 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DONATION_TYPE_MAP = {
     EFECTIVO: "CASH",
     SUMINISTROS: "SUPPLY",
+    BENEFICIO: "BENEFIT",
     CASH: "CASH",
     SUPPLY: "SUPPLY",
+    BENEFIT: "BENEFIT",
 };
 
 const DONATION_TYPE_DISPLAY = {
     CASH: "EFECTIVO",
     SUPPLY: "SUMINISTROS",
+    BENEFIT: "BENEFICIO",
 };
 
 function headerStyle(wb) {
@@ -245,7 +248,7 @@ export function parseDonationsExcel(buffer) {
             return;
         }
         if (!donation_type) {
-            errors.push({ row: rowNum, message: `Tipo inválido: "${row["Tipo"]}". Use EFECTIVO o SUMINISTROS` });
+            errors.push({ row: rowNum, message: `Tipo inválido: "${row["Tipo"]}". Use EFECTIVO, SUMINISTROS o BENEFICIO` });
             return;
         }
         if (id && !UUID_RE.test(id)) {
