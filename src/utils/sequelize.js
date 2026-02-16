@@ -159,17 +159,17 @@ export const projects = sequelize.define('projects', {
         allowNull: false,
         defaultValue: Sequelize.literal('now()::timestamp')
     },
-    assigned_agent_id: {
-        type: DataTypes.UUID,
-        allowNull: true,
-        references: {
-            model: 'users',
-            key: 'id'
-        }
-    }
 }, { freezeTableName: true, timestamps: false, schema: "caderh", tableName: "projects" });
 
-projects.belongsTo(users, { foreignKey: 'assigned_agent_id', as: 'assigned_agent' });
+export const projects_agents = sequelize.define('projects_agents', {
+    id: { type: DataTypes.UUID, primaryKey: true, defaultValue: Sequelize.literal('gen_random_uuid()') },
+    project_id: { type: DataTypes.UUID, allowNull: false, references: { model: 'projects', key: 'id' } },
+    agent_id: { type: DataTypes.UUID, allowNull: false, references: { model: 'users', key: 'id' } },
+    assigned_dt: { type: DataTypes.DATE, allowNull: false, defaultValue: Sequelize.literal('now()::timestamp') },
+}, { freezeTableName: true, timestamps: false, schema: "caderh", tableName: "projects_agents" });
+
+projects.belongsToMany(users, { through: projects_agents, foreignKey: 'project_id', otherKey: 'agent_id', as: 'assigned_agents' });
+users.belongsToMany(projects, { through: projects_agents, foreignKey: 'agent_id', otherKey: 'project_id', as: 'assigned_projects' });
 
 export const project_financing_sources = sequelize.define('project_financing_sources', {
     id: {

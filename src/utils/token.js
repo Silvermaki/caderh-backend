@@ -1,4 +1,5 @@
 import jwt from "jsonwebtoken";
+import { projects_agents } from "./sequelize.js";
 
 export const verify_token = (req, res, next) => {
     if (req.headers['authorization']) {
@@ -43,9 +44,14 @@ export const is_authenticated = (req, res, next) => {
     }
 }
 
-export const check_project_assignment = (req, res, project) => {
+export const check_project_assignment = async (req, res, project) => {
     if (req.user_role === 'ADMIN' || req.user_role === 'MANAGER') return true;
-    if (req.user_role === 'USER' && project.assigned_agent_id === req.user_id) return true;
+    if (req.user_role === 'USER') {
+        const assignment = await projects_agents.findOne({
+            where: { project_id: project.id, agent_id: req.user_id }
+        });
+        if (assignment) return true;
+    }
     res.status(403).json({ message: "No tienes permiso para modificar este proyecto" });
     return false;
 }
