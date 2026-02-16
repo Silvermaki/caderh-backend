@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs";
 import { sequelize, users, user_logs, financing_sources, projects, project_financing_sources, project_donations, project_expenses, project_files, project_beneficiaries, project_logs, expense_categories } from "../../utils/sequelize.js";
 import { projectFileUpload, buildProjectFilePath } from "../../utils/upload.js";
-import { verify_token, is_supervisor } from "../../utils/token.js";
+import { verify_token, is_supervisor, is_authenticated, check_project_assignment } from "../../utils/token.js";
 import { Op } from "sequelize";
 import { fileURLToPath } from "url";
 import multer from "multer";
@@ -154,10 +154,10 @@ router.delete('/financing-source', verify_token, is_supervisor,
 );
 
 // List projects
-router.get("/projects", verify_token, is_supervisor,
+router.get("/projects", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
-            const { limit, offset, sort, desc, search, status } = req.query;
+            const { limit, offset, sort, desc, search, status, assigned_to } = req.query;
             if (!limit || limit > 100) return res.status(400).json({ message: "Faltan campos requeridos" });
 
             const VALID_STATUSES = ["ACTIVE", "ARCHIVED"];
@@ -168,11 +168,14 @@ router.get("/projects", verify_token, is_supervisor,
                 ...(search
                     ? { [Op.or]: { name: { [Op.iLike]: `%${search}%` }, description: { [Op.iLike]: `%${search}%` } } }
                     : {}),
+                ...(assigned_to === "me" ? { assigned_agent_id: req.user_id } : {}),
             };
 
             const result = await projects.findAndCountAll({
                 attributes: [
                     "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "project_category", "created_dt",
+                    "assigned_agent_id",
+                    [sequelize.literal(`(SELECT u.name FROM caderh.users u WHERE u.id = "projects".assigned_agent_id)`), "assigned_agent_name"],
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
@@ -220,7 +223,7 @@ router.delete("/projects/:id", verify_token, is_supervisor,
 );
 
 // Get single project with financial totals
-router.get("/projects/:id", verify_token, is_supervisor,
+router.get("/projects/:id", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { id } = req.params;
@@ -228,6 +231,8 @@ router.get("/projects/:id", verify_token, is_supervisor,
                 where: { id },
                 attributes: [
                     "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "project_category", "created_dt",
+                    "assigned_agent_id",
+                    [sequelize.literal(`(SELECT u.name FROM caderh.users u WHERE u.id = "projects".assigned_agent_id)`), "assigned_agent_name"],
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
@@ -254,7 +259,7 @@ router.get("/projects/:id", verify_token, is_supervisor,
 );
 
 // PATCH accomplishments (update logros without full edit)
-router.patch("/projects/:id/accomplishments", verify_token, is_supervisor,
+router.patch("/projects/:id/accomplishments", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { id } = req.params;
@@ -263,6 +268,7 @@ router.patch("/projects/:id/accomplishments", verify_token, is_supervisor,
             if (!project) {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
+            if (!check_project_assignment(req, res, project)) return;
             let accomplishmentsArr = [];
             if (Array.isArray(accomplishments)) {
                 accomplishmentsArr = accomplishments
@@ -307,10 +313,16 @@ router.patch("/projects/:id/archive", verify_token, is_supervisor,
 // --- Project Wizard ---
 
 // Step 1: Create or update project (project_id opcional: si viene, actualiza; si no, crea)
-router.post("/project/wizard/step1", verify_token, is_supervisor,
+router.post("/project/wizard/step1", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { project_id, name, description, objectives, start_date, end_date, accomplishments, project_category } = req.body;
+
+            // Only ADMIN and MANAGER can create new projects
+            if ((!project_id || !String(project_id).trim()) && req.user_role === 'USER') {
+                return res.status(403).json({ message: "No tienes permiso para crear proyectos" });
+            }
+
             const VALID_CATEGORIES = ["PROJECT", "AGREEMENT"];
             if (!name || !description || !objectives || !start_date || !end_date) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
@@ -346,6 +358,7 @@ router.post("/project/wizard/step1", verify_token, is_supervisor,
                 if (!project) {
                     return res.status(404).json({ message: "Proyecto no encontrado" });
                 }
+                if (!check_project_assignment(req, res, project)) return;
                 await projects.update(payload, { where: { id: project_id } });
                 await user_logs.create({
                     user_id: req.user_id,
@@ -367,7 +380,7 @@ router.post("/project/wizard/step1", verify_token, is_supervisor,
 );
 
 // Step 2: Get financing sources
-router.get("/project/wizard/step2/:projectId", verify_token, is_supervisor,
+router.get("/project/wizard/step2/:projectId", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
@@ -396,7 +409,7 @@ router.get("/project/wizard/step2/:projectId", verify_token, is_supervisor,
 );
 
 // Step 2: Financing sources (replace all)
-router.put("/project/wizard/step2/:projectId", verify_token, is_supervisor,
+router.put("/project/wizard/step2/:projectId", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
@@ -407,6 +420,7 @@ router.put("/project/wizard/step2/:projectId", verify_token, is_supervisor,
             if (!project) {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
+            if (!check_project_assignment(req, res, project)) return;
 
             for (const i of arr) {
                 if (!i.financing_source_id || (typeof i.amount !== "number" && typeof i.amount !== "string")) {
@@ -443,7 +457,7 @@ router.put("/project/wizard/step2/:projectId", verify_token, is_supervisor,
 );
 
 // Step 3: Get donations
-router.get("/project/wizard/step3/:projectId", verify_token, is_supervisor,
+router.get("/project/wizard/step3/:projectId", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
@@ -470,7 +484,7 @@ router.get("/project/wizard/step3/:projectId", verify_token, is_supervisor,
 );
 
 // Step 3: Donations (replace all)
-router.put("/project/wizard/step3/:projectId", verify_token, is_supervisor,
+router.put("/project/wizard/step3/:projectId", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
@@ -482,6 +496,7 @@ router.put("/project/wizard/step3/:projectId", verify_token, is_supervisor,
             if (!project) {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
+            if (!check_project_assignment(req, res, project)) return;
 
             for (const i of arr) {
                 if ((typeof i.amount !== "number" && typeof i.amount !== "string") || !VALID_TYPES.includes(i.donation_type)) {
@@ -514,7 +529,7 @@ router.put("/project/wizard/step3/:projectId", verify_token, is_supervisor,
 );
 
 // Step 4: Get expenses
-router.get("/project/wizard/step4/:projectId", verify_token, is_supervisor,
+router.get("/project/wizard/step4/:projectId", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
@@ -540,7 +555,7 @@ router.get("/project/wizard/step4/:projectId", verify_token, is_supervisor,
 );
 
 // Step 4: Expenses (replace all)
-router.put("/project/wizard/step4/:projectId", verify_token, is_supervisor,
+router.put("/project/wizard/step4/:projectId", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
@@ -551,6 +566,7 @@ router.put("/project/wizard/step4/:projectId", verify_token, is_supervisor,
             if (!project) {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
+            if (!check_project_assignment(req, res, project)) return;
 
             for (const i of arr) {
                 if (typeof i.amount !== "number" && typeof i.amount !== "string") {
@@ -583,7 +599,7 @@ router.put("/project/wizard/step4/:projectId", verify_token, is_supervisor,
 );
 
 // Step 5: Get files
-router.get("/project/wizard/step5/:projectId", verify_token, is_supervisor,
+router.get("/project/wizard/step5/:projectId", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
@@ -603,7 +619,7 @@ router.get("/project/wizard/step5/:projectId", verify_token, is_supervisor,
 );
 
 // Step 5: Upload one file
-router.post("/project/wizard/step5/:projectId", verify_token, is_supervisor,
+router.post("/project/wizard/step5/:projectId", verify_token, is_authenticated,
     (req, res, next) => {
         projectFileUpload.single("file")(req, res, (err) => {
             if (err) {
@@ -627,6 +643,7 @@ router.post("/project/wizard/step5/:projectId", verify_token, is_supervisor,
             if (!project) {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
+            if (!check_project_assignment(req, res, project)) return;
 
             const relativePath = buildProjectFilePath(projectId, customFilename, req.file.originalname);
             const fullPath = path.join(__dirname, "../../files", relativePath);
@@ -655,7 +672,7 @@ router.post("/project/wizard/step5/:projectId", verify_token, is_supervisor,
 );
 
 // Download file (for project detail)
-router.get("/project/:projectId/file/:fileId/download", verify_token, is_supervisor,
+router.get("/project/:projectId/file/:fileId/download", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId, fileId } = req.params;
@@ -673,10 +690,16 @@ router.get("/project/:projectId/file/:fileId/download", verify_token, is_supervi
 );
 
 // Step 5: Delete one file
-router.delete("/project/wizard/step5/:projectId/:fileId", verify_token, is_supervisor,
+router.delete("/project/wizard/step5/:projectId/:fileId", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId, fileId } = req.params;
+
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+            if (!check_project_assignment(req, res, project)) return;
 
             const pf = await project_files.findOne({ where: { id: fileId, project_id: projectId } });
             if (!pf) {
@@ -705,7 +728,7 @@ router.delete("/project/wizard/step5/:projectId/:fileId", verify_token, is_super
 // --- Excel Import/Export ---
 
 // Download financing sources template
-router.get("/project/:projectId/excel/financing-sources", verify_token, is_supervisor,
+router.get("/project/:projectId/excel/financing-sources", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
@@ -727,12 +750,13 @@ router.get("/project/:projectId/excel/financing-sources", verify_token, is_super
 );
 
 // Process financing sources Excel
-router.post("/project/:projectId/excel/financing-sources", verify_token, is_supervisor, excelUpload.single("file"),
+router.post("/project/:projectId/excel/financing-sources", verify_token, is_authenticated, excelUpload.single("file"),
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            if (!check_project_assignment(req, res, project)) return;
             if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
 
             const { parsed, errors } = parseFinancingSourcesExcel(req.file.buffer);
@@ -797,7 +821,7 @@ router.post("/project/:projectId/excel/financing-sources", verify_token, is_supe
 );
 
 // Download donations template
-router.get("/project/:projectId/excel/donations", verify_token, is_supervisor,
+router.get("/project/:projectId/excel/donations", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
@@ -818,12 +842,13 @@ router.get("/project/:projectId/excel/donations", verify_token, is_supervisor,
 );
 
 // Process donations Excel
-router.post("/project/:projectId/excel/donations", verify_token, is_supervisor, excelUpload.single("file"),
+router.post("/project/:projectId/excel/donations", verify_token, is_authenticated, excelUpload.single("file"),
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            if (!check_project_assignment(req, res, project)) return;
             if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
 
             const { parsed, errors } = parseDonationsExcel(req.file.buffer);
@@ -876,7 +901,7 @@ router.post("/project/:projectId/excel/donations", verify_token, is_supervisor, 
 );
 
 // Download expenses template
-router.get("/project/:projectId/excel/expenses", verify_token, is_supervisor,
+router.get("/project/:projectId/excel/expenses", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
@@ -897,12 +922,13 @@ router.get("/project/:projectId/excel/expenses", verify_token, is_supervisor,
 );
 
 // Process expenses Excel
-router.post("/project/:projectId/excel/expenses", verify_token, is_supervisor, excelUpload.single("file"),
+router.post("/project/:projectId/excel/expenses", verify_token, is_authenticated, excelUpload.single("file"),
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            if (!check_project_assignment(req, res, project)) return;
             if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
 
             const { parsed, errors } = parseExpensesExcel(req.file.buffer);
@@ -956,7 +982,7 @@ router.post("/project/:projectId/excel/expenses", verify_token, is_supervisor, e
 // --- Project Detail: Single-item CRUD ---
 
 // Add single financing source
-router.post("/project/:projectId/financing-source", verify_token, is_supervisor,
+router.post("/project/:projectId/financing-source", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
@@ -966,6 +992,7 @@ router.post("/project/:projectId/financing-source", verify_token, is_supervisor,
             }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            if (!check_project_assignment(req, res, project)) return;
             const srcExists = await financing_sources.findOne({ where: { id: financing_source_id } });
             if (!srcExists) return res.status(400).json({ message: "Fuente de financiamiento no encontrada" });
             const row = await project_financing_sources.create({
@@ -986,10 +1013,13 @@ router.post("/project/:projectId/financing-source", verify_token, is_supervisor,
 );
 
 // Delete single financing source
-router.delete("/project/:projectId/financing-source/:id", verify_token, is_supervisor,
+router.delete("/project/:projectId/financing-source/:id", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId, id } = req.params;
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            if (!check_project_assignment(req, res, project)) return;
             const row = await project_financing_sources.findOne({ where: { id, project_id: projectId } });
             if (!row) return res.status(404).json({ message: "Fuente no encontrada" });
             await project_financing_sources.destroy({ where: { id } });
@@ -1005,7 +1035,7 @@ router.delete("/project/:projectId/financing-source/:id", verify_token, is_super
 );
 
 // Add single donation
-router.post("/project/:projectId/donation", verify_token, is_supervisor,
+router.post("/project/:projectId/donation", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
@@ -1016,6 +1046,7 @@ router.post("/project/:projectId/donation", verify_token, is_supervisor,
             }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            if (!check_project_assignment(req, res, project)) return;
             const row = await project_donations.create({
                 project_id: projectId,
                 amount: Math.round(Number(amount) * 100),
@@ -1034,10 +1065,13 @@ router.post("/project/:projectId/donation", verify_token, is_supervisor,
 );
 
 // Delete single donation
-router.delete("/project/:projectId/donation/:id", verify_token, is_supervisor,
+router.delete("/project/:projectId/donation/:id", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId, id } = req.params;
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            if (!check_project_assignment(req, res, project)) return;
             const row = await project_donations.findOne({ where: { id, project_id: projectId } });
             if (!row) return res.status(404).json({ message: "Donación no encontrada" });
             await project_donations.destroy({ where: { id } });
@@ -1053,7 +1087,7 @@ router.delete("/project/:projectId/donation/:id", verify_token, is_supervisor,
 );
 
 // Add single expense
-router.post("/project/:projectId/expense", verify_token, is_supervisor,
+router.post("/project/:projectId/expense", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
@@ -1063,6 +1097,7 @@ router.post("/project/:projectId/expense", verify_token, is_supervisor,
             }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            if (!check_project_assignment(req, res, project)) return;
             const row = await project_expenses.create({
                 project_id: projectId,
                 amount: Math.round(Number(amount) * 100),
@@ -1081,10 +1116,13 @@ router.post("/project/:projectId/expense", verify_token, is_supervisor,
 );
 
 // Delete single expense
-router.delete("/project/:projectId/expense/:id", verify_token, is_supervisor,
+router.delete("/project/:projectId/expense/:id", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId, id } = req.params;
+            const project = await projects.findOne({ where: { id: projectId } });
+            if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
+            if (!check_project_assignment(req, res, project)) return;
             const row = await project_expenses.findOne({ where: { id, project_id: projectId } });
             if (!row) return res.status(404).json({ message: "Gasto no encontrado" });
             await project_expenses.destroy({ where: { id } });
@@ -1099,10 +1137,67 @@ router.delete("/project/:projectId/expense/:id", verify_token, is_supervisor,
     }
 );
 
+// ─── Agent Assignment ────────────────────────────────────────────────────────
+
+// List agents (users with role USER) for assignment dropdown
+router.get("/agents", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const agents = await users.findAll({
+                where: { role: 'USER', disabled: false },
+                attributes: ['id', 'name', 'email'],
+                order: [['name', 'ASC']],
+            });
+            res.status(200).json({ data: agents });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Assign or unassign agent to project
+router.patch("/projects/:id/assign", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const { agent_id } = req.body;
+
+            const project = await projects.findOne({ where: { id } });
+            if (!project || project.project_status === 'DELETED') {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+
+            if (agent_id === null || agent_id === undefined || agent_id === '') {
+                await projects.update({ assigned_agent_id: null }, { where: { id } });
+                await user_logs.create({
+                    user_id: req.user_id,
+                    log: `Desasignó agente del proyecto ID: ${id}, NOMBRE: ${project.name}`,
+                });
+                return res.status(200).json({ ok: true, assigned_agent_id: null, assigned_agent_name: null });
+            }
+
+            const agent = await users.findOne({ where: { id: agent_id, role: 'USER', disabled: false } });
+            if (!agent) {
+                return res.status(400).json({ message: "Agente no encontrado o no es un usuario válido" });
+            }
+
+            await projects.update({ assigned_agent_id: agent_id }, { where: { id } });
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Asignó agente ${agent.name} (${agent_id}) al proyecto ID: ${id}, NOMBRE: ${project.name}`,
+            });
+
+            res.status(200).json({ ok: true, assigned_agent_id: agent_id, assigned_agent_name: agent.name });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
 // ─── Expense Categories CRUD ────────────────────────────────────────────────
 
 // List all expense categories
-router.get("/expense-categories", verify_token, is_supervisor,
+router.get("/expense-categories", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const rows = await expense_categories.findAll({

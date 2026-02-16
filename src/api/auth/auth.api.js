@@ -29,6 +29,7 @@ router.post('/login',
                     let userData = user.toJSON();
                     var token = jwt.sign({ id: userData.id, role: userData.role }, process.env.JWT_KEY);
                     res.status(200).json({
+                        id: userData.id,
                         session: token,
                         email: userData.email,
                         name: userData.name,

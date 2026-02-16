@@ -158,8 +158,18 @@ export const projects = sequelize.define('projects', {
         type: DataTypes.DATE,
         allowNull: false,
         defaultValue: Sequelize.literal('now()::timestamp')
+    },
+    assigned_agent_id: {
+        type: DataTypes.UUID,
+        allowNull: true,
+        references: {
+            model: 'users',
+            key: 'id'
+        }
     }
 }, { freezeTableName: true, timestamps: false, schema: "caderh", tableName: "projects" });
+
+projects.belongsTo(users, { foreignKey: 'assigned_agent_id', as: 'assigned_agent' });
 
 export const project_financing_sources = sequelize.define('project_financing_sources', {
     id: {
