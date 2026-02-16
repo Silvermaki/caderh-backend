@@ -419,3 +419,58 @@ export const project_logs = sequelize.define('project_logs', {
         defaultValue: Sequelize.literal('now()::timestamp')
     }
 }, { freezeTableName: true, timestamps: false, schema: "caderh", tableName: "project_logs" });
+
+// ─── SGC (Sistema de Gestión de Centros) ─────────────────────────────────────
+
+export const sgc_areas = sequelize.define('areas', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    nombre: { type: DataTypes.TEXT, allowNull: false },
+    estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 1 },
+}, { schema: "centros", tableName: "areas", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
+export const sgc_departamentos = sequelize.define('departamentos', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    nombre: { type: DataTypes.TEXT, allowNull: false },
+    estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 1 },
+}, { schema: "centros", tableName: "departamentos", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
+export const sgc_municipios = sequelize.define('municipios', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    nombre: { type: DataTypes.TEXT, allowNull: false },
+    departamento_id: { type: DataTypes.INTEGER, allowNull: false, references: { model: sgc_departamentos, key: 'id' } },
+    geocodigo: { type: DataTypes.TEXT, allowNull: true },
+    estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 1 },
+}, { schema: "centros", tableName: "municipios", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
+sgc_municipios.belongsTo(sgc_departamentos, { foreignKey: 'departamento_id', as: 'departamento' });
+
+export const sgc_centros = sequelize.define('centros', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    siglas: { type: DataTypes.TEXT, allowNull: false },
+    codigo: { type: DataTypes.TEXT, allowNull: false },
+    nombre: { type: DataTypes.TEXT, allowNull: false },
+    descripcion: { type: DataTypes.TEXT, allowNull: true },
+    departamento_id: { type: DataTypes.INTEGER, allowNull: false, references: { model: sgc_departamentos, key: 'id' } },
+    municipio_id: { type: DataTypes.INTEGER, allowNull: false, references: { model: sgc_municipios, key: 'id' } },
+    logo: { type: DataTypes.TEXT, allowNull: true },
+    foto: { type: DataTypes.TEXT, allowNull: true },
+    direccion: { type: DataTypes.TEXT, allowNull: true },
+    telefono: { type: DataTypes.TEXT, allowNull: true },
+    email: { type: DataTypes.TEXT, allowNull: true },
+    pagina_web: { type: DataTypes.TEXT, allowNull: true },
+    facebook: { type: DataTypes.TEXT, allowNull: true },
+    twitter: { type: DataTypes.TEXT, allowNull: true },
+    nombre_director: { type: DataTypes.TEXT, allowNull: true },
+    telefono_director: { type: DataTypes.TEXT, allowNull: true },
+    email_director: { type: DataTypes.TEXT, allowNull: true },
+    foto_director: { type: DataTypes.TEXT, allowNull: true },
+    nombre_contacto: { type: DataTypes.TEXT, allowNull: true },
+    telefono_contacto: { type: DataTypes.TEXT, allowNull: true },
+    email_contacto: { type: DataTypes.TEXT, allowNull: true },
+    puesto_contacto: { type: DataTypes.TEXT, allowNull: true },
+    pie_reportes: { type: DataTypes.TEXT, allowNull: true },
+    estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 0 },
+}, { schema: "centros", tableName: "centros", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
+sgc_centros.belongsTo(sgc_departamentos, { foreignKey: 'departamento_id', as: 'departamento' });
+sgc_centros.belongsTo(sgc_municipios, { foreignKey: 'municipio_id', as: 'municipio' });
