@@ -1,7 +1,7 @@
 import { Router } from "express";
 import path from "path";
 import fs from "fs";
-import { sequelize, users, user_logs, financing_sources, projects, project_financing_sources, project_donations, project_expenses, project_files, project_beneficiaries, project_logs, expense_categories } from "../../utils/sequelize.js";
+import { sequelize, users, user_logs, financing_sources, projects, project_financing_sources, project_donations, project_expenses, project_files, project_beneficiaries, project_logs, expense_categories, projects_agents } from "../../utils/sequelize.js";
 import { projectFileUpload, buildProjectFilePath } from "../../utils/upload.js";
 import { verify_token, is_supervisor, is_authenticated, check_project_assignment } from "../../utils/token.js";
 import { Op } from "sequelize";
@@ -168,14 +168,15 @@ router.get("/projects", verify_token, is_authenticated,
                 ...(search
                     ? { [Op.or]: { name: { [Op.iLike]: `%${search}%` }, description: { [Op.iLike]: `%${search}%` } } }
                     : {}),
-                ...(assigned_to === "me" ? { assigned_agent_id: req.user_id } : {}),
+                ...(assigned_to === "me" ? {
+                    id: { [Op.in]: sequelize.literal(`(SELECT pa.project_id FROM caderh.projects_agents pa WHERE pa.agent_id = '${req.user_id}')`) }
+                } : {}),
             };
 
             const result = await projects.findAndCountAll({
                 attributes: [
                     "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "project_category", "created_dt",
-                    "assigned_agent_id",
-                    [sequelize.literal(`(SELECT u.name FROM caderh.users u WHERE u.id = "projects".assigned_agent_id)`), "assigned_agent_name"],
+                    [sequelize.literal(`(SELECT COALESCE(json_agg(json_build_object('id', u.id, 'name', u.name)), '[]') FROM caderh.projects_agents pa JOIN caderh.users u ON u.id = pa.agent_id WHERE pa.project_id = "projects".id)`), "assigned_agents"],
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
@@ -231,8 +232,7 @@ router.get("/projects/:id", verify_token, is_authenticated,
                 where: { id },
                 attributes: [
                     "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "project_category", "created_dt",
-                    "assigned_agent_id",
-                    [sequelize.literal(`(SELECT u.name FROM caderh.users u WHERE u.id = "projects".assigned_agent_id)`), "assigned_agent_name"],
+                    [sequelize.literal(`(SELECT COALESCE(json_agg(json_build_object('id', u.id, 'name', u.name)), '[]') FROM caderh.projects_agents pa JOIN caderh.users u ON u.id = pa.agent_id WHERE pa.project_id = "projects".id)`), "assigned_agents"],
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
@@ -268,7 +268,7 @@ router.patch("/projects/:id/accomplishments", verify_token, is_authenticated,
             if (!project) {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
             let accomplishmentsArr = [];
             if (Array.isArray(accomplishments)) {
                 accomplishmentsArr = accomplishments
@@ -358,7 +358,7 @@ router.post("/project/wizard/step1", verify_token, is_authenticated,
                 if (!project) {
                     return res.status(404).json({ message: "Proyecto no encontrado" });
                 }
-                if (!check_project_assignment(req, res, project)) return;
+                if (!(await check_project_assignment(req, res, project))) return;
                 await projects.update(payload, { where: { id: project_id } });
                 await user_logs.create({
                     user_id: req.user_id,
@@ -420,7 +420,7 @@ router.put("/project/wizard/step2/:projectId", verify_token, is_authenticated,
             if (!project) {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
 
             for (const i of arr) {
                 if (!i.financing_source_id || (typeof i.amount !== "number" && typeof i.amount !== "string")) {
@@ -496,7 +496,7 @@ router.put("/project/wizard/step3/:projectId", verify_token, is_authenticated,
             if (!project) {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
 
             for (const i of arr) {
                 if ((typeof i.amount !== "number" && typeof i.amount !== "string") || !VALID_TYPES.includes(i.donation_type)) {
@@ -566,7 +566,7 @@ router.put("/project/wizard/step4/:projectId", verify_token, is_authenticated,
             if (!project) {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
 
             for (const i of arr) {
                 if (typeof i.amount !== "number" && typeof i.amount !== "string") {
@@ -643,7 +643,7 @@ router.post("/project/wizard/step5/:projectId", verify_token, is_authenticated,
             if (!project) {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
 
             const relativePath = buildProjectFilePath(projectId, customFilename, req.file.originalname);
             const fullPath = path.join(__dirname, "../../files", relativePath);
@@ -699,7 +699,7 @@ router.delete("/project/wizard/step5/:projectId/:fileId", verify_token, is_authe
             if (!project) {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
 
             const pf = await project_files.findOne({ where: { id: fileId, project_id: projectId } });
             if (!pf) {
@@ -756,7 +756,7 @@ router.post("/project/:projectId/excel/financing-sources", verify_token, is_auth
             const { projectId } = req.params;
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
             if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
 
             const { parsed, errors } = parseFinancingSourcesExcel(req.file.buffer);
@@ -848,7 +848,7 @@ router.post("/project/:projectId/excel/donations", verify_token, is_authenticate
             const { projectId } = req.params;
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
             if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
 
             const { parsed, errors } = parseDonationsExcel(req.file.buffer);
@@ -928,7 +928,7 @@ router.post("/project/:projectId/excel/expenses", verify_token, is_authenticated
             const { projectId } = req.params;
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
             if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
 
             const { parsed, errors } = parseExpensesExcel(req.file.buffer);
@@ -992,7 +992,7 @@ router.post("/project/:projectId/financing-source", verify_token, is_authenticat
             }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
             const srcExists = await financing_sources.findOne({ where: { id: financing_source_id } });
             if (!srcExists) return res.status(400).json({ message: "Fuente de financiamiento no encontrada" });
             const row = await project_financing_sources.create({
@@ -1019,7 +1019,7 @@ router.delete("/project/:projectId/financing-source/:id", verify_token, is_authe
             const { projectId, id } = req.params;
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
             const row = await project_financing_sources.findOne({ where: { id, project_id: projectId } });
             if (!row) return res.status(404).json({ message: "Fuente no encontrada" });
             await project_financing_sources.destroy({ where: { id } });
@@ -1046,7 +1046,7 @@ router.post("/project/:projectId/donation", verify_token, is_authenticated,
             }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
             const row = await project_donations.create({
                 project_id: projectId,
                 amount: Math.round(Number(amount) * 100),
@@ -1071,7 +1071,7 @@ router.delete("/project/:projectId/donation/:id", verify_token, is_authenticated
             const { projectId, id } = req.params;
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
             const row = await project_donations.findOne({ where: { id, project_id: projectId } });
             if (!row) return res.status(404).json({ message: "Donación no encontrada" });
             await project_donations.destroy({ where: { id } });
@@ -1097,7 +1097,7 @@ router.post("/project/:projectId/expense", verify_token, is_authenticated,
             }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
             const row = await project_expenses.create({
                 project_id: projectId,
                 amount: Math.round(Number(amount) * 100),
@@ -1122,7 +1122,7 @@ router.delete("/project/:projectId/expense/:id", verify_token, is_authenticated,
             const { projectId, id } = req.params;
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
-            if (!check_project_assignment(req, res, project)) return;
+            if (!(await check_project_assignment(req, res, project))) return;
             const row = await project_expenses.findOne({ where: { id, project_id: projectId } });
             if (!row) return res.status(404).json({ message: "Gasto no encontrado" });
             await project_expenses.destroy({ where: { id } });
@@ -1155,39 +1155,48 @@ router.get("/agents", verify_token, is_supervisor,
     }
 );
 
-// Assign or unassign agent to project
+// Assign or unassign agents to project (multi-agent)
 router.patch("/projects/:id/assign", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
             const { id } = req.params;
-            const { agent_id } = req.body;
+            const { agent_ids } = req.body;
 
             const project = await projects.findOne({ where: { id } });
             if (!project || project.project_status === 'DELETED') {
                 return res.status(404).json({ message: "Proyecto no encontrado" });
             }
 
-            if (agent_id === null || agent_id === undefined || agent_id === '') {
-                await projects.update({ assigned_agent_id: null }, { where: { id } });
-                await user_logs.create({
-                    user_id: req.user_id,
-                    log: `Desasignó agente del proyecto ID: ${id}, NOMBRE: ${project.name}`,
+            const ids = Array.isArray(agent_ids) ? agent_ids.filter(Boolean) : [];
+
+            if (ids.length > 0) {
+                const validAgents = await users.findAll({
+                    where: { id: { [Op.in]: ids }, role: 'USER', disabled: false },
+                    attributes: ['id', 'name'],
                 });
-                return res.status(200).json({ ok: true, assigned_agent_id: null, assigned_agent_name: null });
+                const validIds = validAgents.map((a) => a.id);
+                const invalid = ids.filter((aid) => !validIds.includes(aid));
+                if (invalid.length > 0) {
+                    return res.status(400).json({ message: `Agentes no válidos: ${invalid.join(', ')}` });
+                }
             }
 
-            const agent = await users.findOne({ where: { id: agent_id, role: 'USER', disabled: false } });
-            if (!agent) {
-                return res.status(400).json({ message: "Agente no encontrado o no es un usuario válido" });
+            await projects_agents.destroy({ where: { project_id: id } });
+
+            if (ids.length > 0) {
+                await projects_agents.bulkCreate(
+                    ids.map((agent_id) => ({ project_id: id, agent_id }))
+                );
             }
 
-            await projects.update({ assigned_agent_id: agent_id }, { where: { id } });
             await user_logs.create({
                 user_id: req.user_id,
-                log: `Asignó agente ${agent.name} (${agent_id}) al proyecto ID: ${id}, NOMBRE: ${project.name}`,
+                log: ids.length > 0
+                    ? `Asignó ${ids.length} agente(s) al proyecto ID: ${id}, NOMBRE: ${project.name}`
+                    : `Desasignó todos los agentes del proyecto ID: ${id}, NOMBRE: ${project.name}`,
             });
 
-            res.status(200).json({ ok: true, assigned_agent_id: agent_id, assigned_agent_name: agent.name });
+            res.status(200).json({ ok: true });
         } catch (e) {
             next(e);
         }
