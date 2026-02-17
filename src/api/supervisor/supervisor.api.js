@@ -212,9 +212,10 @@ router.delete("/projects/:id", verify_token, is_supervisor,
             const project = await projects.findOne({ where: { id } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
             await projects.update({ project_status: 'DELETED' }, { where: { id } });
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Eliminó proyecto ID: ${id}, NOMBRE: ${project.name}`,
+                project_id: id,
+                log: `Eliminó proyecto`,
             });
             res.status(200).json({ ok: true });
         } catch (e) {
@@ -258,6 +259,37 @@ router.get("/projects/:id", verify_token, is_authenticated,
     }
 );
 
+// Get project logs (bitacora)
+router.get("/projects/:id/logs", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const { limit, offset } = req.query;
+            if (!limit || limit > 100) return res.status(400).json({ message: "Faltan campos requeridos" });
+
+            const project = await projects.findOne({ where: { id } });
+            if (!project || project.project_status === 'DELETED') {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+
+            const result = await project_logs.findAndCountAll({
+                where: { project_id: id },
+                attributes: [
+                    "id", "log", "created_dt",
+                    [sequelize.literal(`(SELECT u.name FROM caderh.users u WHERE u.id = "project_logs".user_id)`), "user_name"],
+                ],
+                order: [["created_dt", "DESC"]],
+                limit: Number(limit),
+                offset: Number(offset ?? 0),
+            });
+
+            res.status(200).json({ data: result.rows, count: result.count });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
 // PATCH accomplishments (update logros without full edit)
 router.patch("/projects/:id/accomplishments", verify_token, is_authenticated,
     async (req, res, next) => {
@@ -276,9 +308,10 @@ router.patch("/projects/:id/accomplishments", verify_token, is_authenticated,
                     .map((a) => ({ text: String(a.text).trim(), completed: Boolean(a.completed) }));
             }
             await projects.update({ accomplishments: accomplishmentsArr }, { where: { id } });
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Actualizó logros del proyecto ID: ${id}`,
+                project_id: id,
+                log: `Actualizó logros del proyecto`,
             });
             res.status(200).json({ ok: true });
         } catch (e) {
@@ -299,9 +332,10 @@ router.patch("/projects/:id/archive", verify_token, is_supervisor,
             const newStatus = project.project_status === 'ARCHIVED' ? 'ACTIVE' : 'ARCHIVED';
             await projects.update({ project_status: newStatus }, { where: { id } });
             const action = newStatus === 'ARCHIVED' ? 'Archivó' : 'Desarchivó';
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `${action} proyecto ID: ${id}, NOMBRE: ${project.name}`,
+                project_id: id,
+                log: `${action} proyecto`,
             });
             res.status(200).json({ ok: true, project_status: newStatus });
         } catch (e) {
@@ -360,17 +394,19 @@ router.post("/project/wizard/step1", verify_token, is_authenticated,
                 }
                 if (!(await check_project_assignment(req, res, project))) return;
                 await projects.update(payload, { where: { id: project_id } });
-                await user_logs.create({
+                await project_logs.create({
                     user_id: req.user_id,
-                    log: `Actualizó proyecto ID: ${project_id}, NOMBRE: ${payload.name}`,
+                    project_id: project_id,
+                    log: `Actualizó información general del proyecto`,
                 });
                 return res.status(200).json({ project_id: project_id });
             }
 
             const project = await projects.create({ ...payload, project_status: 'ACTIVE' });
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Creó proyecto ID: ${project.id}, NOMBRE: ${project.name}`,
+                project_id: project.id,
+                log: `Creó el proyecto`,
             });
             res.status(200).json({ project_id: project.id });
         } catch (e) {
@@ -444,9 +480,10 @@ router.put("/project/wizard/step2/:projectId", verify_token, is_authenticated,
                 );
             }
 
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Actualizó fuentes de financiamiento del proyecto ID: ${projectId}`,
+                project_id: projectId,
+                log: `Actualizó fuentes de financiamiento del proyecto`,
             });
 
             res.status(200).json({ ok: true });
@@ -516,9 +553,10 @@ router.put("/project/wizard/step3/:projectId", verify_token, is_authenticated,
                 );
             }
 
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Actualizó donaciones del proyecto ID: ${projectId}`,
+                project_id: projectId,
+                log: `Actualizó donaciones del proyecto`,
             });
 
             res.status(200).json({ ok: true });
@@ -586,9 +624,10 @@ router.put("/project/wizard/step4/:projectId", verify_token, is_authenticated,
                 );
             }
 
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Actualizó gastos del proyecto ID: ${projectId}`,
+                project_id: projectId,
+                log: `Actualizó gastos del proyecto`,
             });
 
             res.status(200).json({ ok: true });
@@ -659,9 +698,10 @@ router.post("/project/wizard/step5/:projectId", verify_token, is_authenticated,
                 description: description.toString().trim() || displayName,
             });
 
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Subió archivo al proyecto ID: ${projectId}, archivo: ${displayName}`,
+                project_id: projectId,
+                log: `Subió archivo: ${displayName}`,
             });
 
             res.status(200).json({ ok: true, file_id: pf.id });
@@ -713,9 +753,10 @@ router.delete("/project/wizard/step5/:projectId/:fileId", verify_token, is_authe
 
             await project_files.destroy({ where: { id: fileId } });
 
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Eliminó archivo del proyecto ID: ${projectId}, archivo ID: ${fileId}`,
+                project_id: projectId,
+                log: `Eliminó archivo del proyecto`,
             });
 
             res.status(200).json({ ok: true });
@@ -808,9 +849,10 @@ router.post("/project/:projectId/excel/financing-sources", verify_token, is_auth
                 }
             }
 
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Importó fuentes de financiamiento por Excel para proyecto ID: ${projectId} (${processed} procesados, ${errors.length} errores)`,
+                project_id: projectId,
+                log: `Importó fuentes de financiamiento por Excel (${processed} procesados, ${errors.length} errores)`,
             });
 
             res.status(200).json({ ok: true, processed, errors: errors.length, errorDetails: errors });
@@ -888,9 +930,10 @@ router.post("/project/:projectId/excel/donations", verify_token, is_authenticate
                 }
             }
 
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Importó donaciones por Excel para proyecto ID: ${projectId} (${processed} procesados, ${errors.length} errores)`,
+                project_id: projectId,
+                log: `Importó donaciones por Excel (${processed} procesados, ${errors.length} errores)`,
             });
 
             res.status(200).json({ ok: true, processed, errors: errors.length, errorDetails: errors });
@@ -967,9 +1010,10 @@ router.post("/project/:projectId/excel/expenses", verify_token, is_authenticated
                 }
             }
 
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Importó gastos por Excel para proyecto ID: ${projectId} (${processed} procesados, ${errors.length} errores)`,
+                project_id: projectId,
+                log: `Importó gastos por Excel (${processed} procesados, ${errors.length} errores)`,
             });
 
             res.status(200).json({ ok: true, processed, errors: errors.length, errorDetails: errors });
@@ -1001,9 +1045,10 @@ router.post("/project/:projectId/financing-source", verify_token, is_authenticat
                 amount: Math.round(Number(amount) * 100),
                 description: (description ?? "").toString(),
             });
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Agregó fuente de financiamiento al proyecto ID: ${projectId}`,
+                project_id: projectId,
+                log: `Agregó fuente de financiamiento al proyecto`,
             });
             res.status(201).json({ ok: true, id: row.id });
         } catch (e) {
@@ -1023,9 +1068,10 @@ router.delete("/project/:projectId/financing-source/:id", verify_token, is_authe
             const row = await project_financing_sources.findOne({ where: { id, project_id: projectId } });
             if (!row) return res.status(404).json({ message: "Fuente no encontrada" });
             await project_financing_sources.destroy({ where: { id } });
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Eliminó fuente de financiamiento del proyecto ID: ${projectId}`,
+                project_id: projectId,
+                log: `Eliminó fuente de financiamiento del proyecto`,
             });
             res.status(200).json({ ok: true });
         } catch (e) {
@@ -1053,9 +1099,10 @@ router.post("/project/:projectId/donation", verify_token, is_authenticated,
                 description: (description ?? "").toString(),
                 donation_type,
             });
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Agregó donación al proyecto ID: ${projectId}`,
+                project_id: projectId,
+                log: `Agregó donación al proyecto`,
             });
             res.status(201).json({ ok: true, id: row.id });
         } catch (e) {
@@ -1075,9 +1122,10 @@ router.delete("/project/:projectId/donation/:id", verify_token, is_authenticated
             const row = await project_donations.findOne({ where: { id, project_id: projectId } });
             if (!row) return res.status(404).json({ message: "Donación no encontrada" });
             await project_donations.destroy({ where: { id } });
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Eliminó donación del proyecto ID: ${projectId}`,
+                project_id: projectId,
+                log: `Eliminó donación del proyecto`,
             });
             res.status(200).json({ ok: true });
         } catch (e) {
@@ -1104,9 +1152,10 @@ router.post("/project/:projectId/expense", verify_token, is_authenticated,
                 description: (description ?? "").toString(),
                 expense_category_id: expense_category_id || null,
             });
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Agregó gasto al proyecto ID: ${projectId}`,
+                project_id: projectId,
+                log: `Agregó gasto al proyecto`,
             });
             res.status(201).json({ ok: true, id: row.id });
         } catch (e) {
@@ -1126,9 +1175,10 @@ router.delete("/project/:projectId/expense/:id", verify_token, is_authenticated,
             const row = await project_expenses.findOne({ where: { id, project_id: projectId } });
             if (!row) return res.status(404).json({ message: "Gasto no encontrado" });
             await project_expenses.destroy({ where: { id } });
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
-                log: `Eliminó gasto del proyecto ID: ${projectId}`,
+                project_id: projectId,
+                log: `Eliminó gasto del proyecto`,
             });
             res.status(200).json({ ok: true });
         } catch (e) {
@@ -1189,11 +1239,12 @@ router.patch("/projects/:id/assign", verify_token, is_supervisor,
                 );
             }
 
-            await user_logs.create({
+            await project_logs.create({
                 user_id: req.user_id,
+                project_id: id,
                 log: ids.length > 0
-                    ? `Asignó ${ids.length} agente(s) al proyecto ID: ${id}, NOMBRE: ${project.name}`
-                    : `Desasignó todos los agentes del proyecto ID: ${id}, NOMBRE: ${project.name}`,
+                    ? `Asignó ${ids.length} agente(s) al proyecto`
+                    : `Desasignó todos los agentes del proyecto`,
             });
 
             res.status(200).json({ ok: true });
