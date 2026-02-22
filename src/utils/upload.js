@@ -24,6 +24,18 @@ export const projectFileUpload = multer({
     limits: { fileSize: MAX_FILE_SIZE },
 });
 
+export const instructorFileUpload = multer({
+    storage: multer.memoryStorage(),
+    fileFilter,
+    limits: { fileSize: MAX_FILE_SIZE },
+});
+
+export function buildInstructorFilePath(instructorId, originalName) {
+    const ext = path.extname(originalName).toLowerCase();
+    const safeExt = ALLOWED_EXTENSIONS.includes(ext) ? ext : ".bin";
+    return path.join("instructors", String(instructorId), "cv" + safeExt);
+}
+
 export function sanitizeFilename(name) {
     return name.replace(/[/\\?%*:|"<>]/g, "_").replace(/\.\./g, "");
 }

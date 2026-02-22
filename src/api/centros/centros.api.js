@@ -2,6 +2,12 @@ import { Router } from "express";
 import { sequelize, user_logs, sgc_areas, sgc_departamentos, sgc_municipios, sgc_centros, sgc_instructors, sgc_estudiantes, sgc_cursos, sgc_nivel_escolaridads } from "../../utils/sequelize.js";
 import { verify_token, is_supervisor, is_authenticated } from "../../utils/token.js";
 import { Op } from "sequelize";
+import { instructorFileUpload, buildInstructorFilePath } from "../../utils/upload.js";
+import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const router = Router();
 
@@ -169,7 +175,17 @@ router.get("/municipios", verify_token, is_authenticated,
 router.get("/centros", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
-            const { limit, offset, sort, desc, search, estatus } = req.query;
+            const { limit, offset, sort, desc, search, estatus, all } = req.query;
+
+            if (all === "true") {
+                const rows = await sgc_centros.findAll({
+                    where: { estatus: 1 },
+                    attributes: ["id", "nombre"],
+                    order: [["nombre", "ASC"]],
+                });
+                return res.status(200).json({ data: rows });
+            }
+
             if (!limit || limit > 100) return res.status(400).json({ message: "Faltan campos requeridos" });
 
             const statusFilter = estatus === "0" ? 0 : 1;
@@ -266,7 +282,7 @@ router.get("/nivel-escolaridades", verify_token, is_authenticated,
     }
 );
 
-// ─── Instructores CRUD ───────────────────────────────────────────────────────
+// ─── Instructores CRUD (por centro) ─────────────────────────────────────────
 
 router.get("/centros/:centroId/instructors", verify_token, is_authenticated,
     async (req, res, next) => {
@@ -281,21 +297,16 @@ router.get("/centros/:centroId/instructors", verify_token, is_authenticated,
                 ...(search
                     ? {
                         [Op.or]: [
-                            { identidad: { [Op.iLike]: `%${search}%` } },
                             { nombres: { [Op.iLike]: `%${search}%` } },
                             { apellidos: { [Op.iLike]: `%${search}%` } },
+                            { titulo_obtenido: { [Op.iLike]: `%${search}%` } },
                         ],
                     }
                     : {}),
             };
 
             const result = await sgc_instructors.findAndCountAll({
-                attributes: [
-                    "id", "identidad", "nombres", "apellidos", "email", "telefono", "celular", "sexo", "estado_civil", "estatus", "created_at",
-                    "departamento_id", "municipio_id", "nivel_escolaridad_id", "titulo_obtenido", "fecha_nacimiento", "direccion",
-                    [sequelize.literal(`(SELECT d.nombre FROM centros.departamentos d WHERE d.id = "instructors".departamento_id)`), "departamento_nombre"],
-                    [sequelize.literal(`(SELECT m.nombre FROM centros.municipios m WHERE m.id = "instructors".municipio_id)`), "municipio_nombre"],
-                ],
+                attributes: ["id", "centro_id", "nombres", "apellidos", "titulo_obtenido", "otros_titulos", "pdf"],
                 where,
                 order: sort ? [[sort, desc === "desc" ? "DESC" : "ASC"]] : [["nombres", "ASC"]],
                 limit: Number(limit),
@@ -313,18 +324,17 @@ router.post("/centros/:centroId/instructors", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
             const centroId = Number(req.params.centroId);
-            const { identidad, nombres, apellidos, departamento_id, municipio_id, email, telefono, celular, sexo, estado_civil, nivel_escolaridad_id, titulo_obtenido, fecha_nacimiento, direccion } = req.body;
+            const { nombres, apellidos, titulo_obtenido, otros_titulos } = req.body;
 
-            if (!identidad || !nombres || !apellidos || !departamento_id || !municipio_id || !sexo || !estado_civil) {
+            if (!nombres || !apellidos) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
             const instructor = await sgc_instructors.create({
-                centro_id: centroId, identidad: identidad.trim(), nombres: nombres.trim(), apellidos: apellidos.trim(),
-                departamento_id, municipio_id, email: email?.trim() || null, telefono: telefono?.trim() || null,
-                celular: celular?.trim() || null, sexo, estado_civil, nivel_escolaridad_id: nivel_escolaridad_id || 0,
-                titulo_obtenido: titulo_obtenido?.trim() || null, fecha_nacimiento: fecha_nacimiento || null,
-                direccion: direccion?.trim() || null, estatus: 1,
+                centro_id: centroId, nombres: nombres.trim(), apellidos: apellidos.trim(),
+                identidad: "N/A", departamento_id: 0, municipio_id: 0, sexo: "N/A", estado_civil: "N/A",
+                titulo_obtenido: titulo_obtenido?.trim() || null, otros_titulos: otros_titulos?.trim() || null,
+                estatus: 1,
             });
 
             await user_logs.create({ user_id: req.user_id, log: `Creó instructor ID: ${instructor.id}, CENTRO: ${centroId}` });
@@ -339,9 +349,9 @@ router.put("/centros/:centroId/instructors", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
             const centroId = Number(req.params.centroId);
-            const { id, identidad, nombres, apellidos, departamento_id, municipio_id, email, telefono, celular, sexo, estado_civil, nivel_escolaridad_id, titulo_obtenido, fecha_nacimiento, direccion } = req.body;
+            const { id, nombres, apellidos, titulo_obtenido, otros_titulos } = req.body;
 
-            if (!id || !identidad || !nombres || !apellidos || !departamento_id || !municipio_id || !sexo || !estado_civil) {
+            if (!id || !nombres || !apellidos) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
@@ -349,11 +359,8 @@ router.put("/centros/:centroId/instructors", verify_token, is_supervisor,
             if (!instructor) return res.status(404).json({ message: "Instructor no encontrado" });
 
             await sgc_instructors.update({
-                identidad: identidad.trim(), nombres: nombres.trim(), apellidos: apellidos.trim(),
-                departamento_id, municipio_id, email: email?.trim() || null, telefono: telefono?.trim() || null,
-                celular: celular?.trim() || null, sexo, estado_civil, nivel_escolaridad_id: nivel_escolaridad_id || 0,
-                titulo_obtenido: titulo_obtenido?.trim() || null, fecha_nacimiento: fecha_nacimiento || null,
-                direccion: direccion?.trim() || null,
+                nombres: nombres.trim(), apellidos: apellidos.trim(),
+                titulo_obtenido: titulo_obtenido?.trim() || null, otros_titulos: otros_titulos?.trim() || null,
             }, { where: { id, centro_id: centroId } });
 
             await user_logs.create({ user_id: req.user_id, log: `Actualizó instructor ID: ${id}, CENTRO: ${centroId}` });
@@ -373,6 +380,191 @@ router.delete("/centros/:centroId/instructors/:id", verify_token, is_supervisor,
 
             await sgc_instructors.update({ estatus: 0 }, { where: { id, centro_id: centroId } });
             await user_logs.create({ user_id: req.user_id, log: `Eliminó instructor ID: ${id}, CENTRO: ${centroId}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Instructores CRUD (global) ─────────────────────────────────────────────
+
+router.get("/instructors", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { limit, offset, sort, desc, search, centro_id } = req.query;
+            if (!limit || limit > 100) return res.status(400).json({ message: "Faltan campos requeridos" });
+
+            const where = {
+                estatus: 1,
+                ...(centro_id ? { centro_id: Number(centro_id) } : {}),
+                ...(search
+                    ? {
+                        [Op.or]: [
+                            { nombres: { [Op.iLike]: `%${search}%` } },
+                            { apellidos: { [Op.iLike]: `%${search}%` } },
+                            { titulo_obtenido: { [Op.iLike]: `%${search}%` } },
+                        ],
+                    }
+                    : {}),
+            };
+
+            const result = await sgc_instructors.findAndCountAll({
+                attributes: [
+                    "id", "centro_id", "nombres", "apellidos", "titulo_obtenido", "otros_titulos", "pdf",
+                    [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "instructors".centro_id)`), "centro_nombre"],
+                ],
+                where,
+                order: sort ? [[sort, desc === "desc" ? "DESC" : "ASC"]] : [["nombres", "ASC"]],
+                limit: Number(limit),
+                offset: Number(offset ?? 0),
+            });
+
+            res.status(200).json({ data: result.rows, count: result.count });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/instructors", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { centro_id, nombres, apellidos, titulo_obtenido, otros_titulos } = req.body;
+
+            if (!centro_id || !nombres || !apellidos) {
+                return res.status(400).json({ message: "Faltan campos requeridos" });
+            }
+
+            const centro = await sgc_centros.findOne({ where: { id: centro_id } });
+            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+
+            const instructor = await sgc_instructors.create({
+                centro_id, nombres: nombres.trim(), apellidos: apellidos.trim(),
+                identidad: "N/A", departamento_id: 0, municipio_id: 0, sexo: "N/A", estado_civil: "N/A",
+                titulo_obtenido: titulo_obtenido?.trim() || null, otros_titulos: otros_titulos?.trim() || null,
+                estatus: 1,
+            });
+
+            await user_logs.create({ user_id: req.user_id, log: `Creó instructor ID: ${instructor.id}, CENTRO: ${centro_id}` });
+            res.status(201).json({ ok: true, id: instructor.id });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.put("/instructors", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id, nombres, apellidos, titulo_obtenido, otros_titulos } = req.body;
+
+            if (!id || !nombres || !apellidos) {
+                return res.status(400).json({ message: "Faltan campos requeridos" });
+            }
+
+            const instructor = await sgc_instructors.findOne({ where: { id, estatus: 1 } });
+            if (!instructor) return res.status(404).json({ message: "Instructor no encontrado" });
+
+            await sgc_instructors.update({
+                nombres: nombres.trim(), apellidos: apellidos.trim(),
+                titulo_obtenido: titulo_obtenido?.trim() || null, otros_titulos: otros_titulos?.trim() || null,
+            }, { where: { id } });
+
+            await user_logs.create({ user_id: req.user_id, log: `Actualizó instructor ID: ${id}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.delete("/instructors/:id", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const instructor = await sgc_instructors.findOne({ where: { id, estatus: 1 } });
+            if (!instructor) return res.status(404).json({ message: "Instructor no encontrado" });
+
+            await sgc_instructors.update({ estatus: 0 }, { where: { id } });
+            await user_logs.create({ user_id: req.user_id, log: `Eliminó instructor ID: ${id}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Instructor PDF (hoja de vida) ──────────────────────────────────────────
+
+router.post("/instructors/:id/pdf", verify_token, is_supervisor,
+    (req, res, next) => {
+        instructorFileUpload.single("file")(req, res, (err) => {
+            if (err) {
+                if (err.code === "LIMIT_FILE_SIZE") return res.status(400).json({ message: "Archivo excede 10MB" });
+                return res.status(400).json({ message: err.message || "Error al subir archivo" });
+            }
+            next();
+        });
+    },
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            if (!req.file) return res.status(400).json({ message: "No se envió un archivo" });
+
+            const instructor = await sgc_instructors.findOne({ where: { id, estatus: 1 } });
+            if (!instructor) return res.status(404).json({ message: "Instructor no encontrado" });
+
+            if (instructor.pdf) {
+                const oldPath = path.join(__dirname, "../../files", instructor.pdf);
+                if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+            }
+
+            const relativePath = buildInstructorFilePath(id, req.file.originalname);
+            const fullPath = path.join(__dirname, "../../files", relativePath);
+            fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+            fs.writeFileSync(fullPath, req.file.buffer);
+
+            await sgc_instructors.update({ pdf: relativePath }, { where: { id } });
+
+            await user_logs.create({ user_id: req.user_id, log: `Subió hoja de vida para instructor ID: ${id}` });
+            res.status(200).json({ ok: true, pdf: relativePath });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.get("/instructors/:id/pdf", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const instructor = await sgc_instructors.findOne({ where: { id, estatus: 1 }, attributes: ["pdf"] });
+            if (!instructor || !instructor.pdf) return res.status(404).json({ message: "Archivo no encontrado" });
+
+            const fullPath = path.join(__dirname, "../../files", instructor.pdf);
+            if (!fs.existsSync(fullPath)) return res.status(404).json({ message: "Archivo no encontrado en el servidor" });
+
+            res.sendFile(path.resolve(fullPath));
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.delete("/instructors/:id/pdf", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const instructor = await sgc_instructors.findOne({ where: { id, estatus: 1 }, attributes: ["id", "pdf"] });
+            if (!instructor) return res.status(404).json({ message: "Instructor no encontrado" });
+            if (!instructor.pdf) return res.status(404).json({ message: "El instructor no tiene hoja de vida" });
+
+            const fullPath = path.join(__dirname, "../../files", instructor.pdf);
+            if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+
+            await sgc_instructors.update({ pdf: null }, { where: { id } });
+            await user_logs.create({ user_id: req.user_id, log: `Eliminó hoja de vida del instructor ID: ${id}` });
             res.status(200).json({ ok: true });
         } catch (e) {
             next(e);
