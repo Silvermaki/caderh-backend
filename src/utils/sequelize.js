@@ -589,3 +589,79 @@ export const sgc_estudiantes = sequelize.define('estudiantes', {
 sgc_estudiantes.belongsTo(sgc_centros, { foreignKey: 'centro_id', as: 'centro' });
 sgc_estudiantes.belongsTo(sgc_departamentos, { foreignKey: 'departamento_id', as: 'departamento' });
 sgc_estudiantes.belongsTo(sgc_municipios, { foreignKey: 'municipio_id', as: 'municipio' });
+
+// ─── Curso Modulos ───────────────────────────────────────────────────────────
+export const sgc_curso_modulos = sequelize.define('curso_modulos', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    curso_id: { type: DataTypes.INTEGER, allowNull: false },
+    codigo: { type: DataTypes.TEXT, allowNull: false },
+    nombre: { type: DataTypes.TEXT, allowNull: false },
+    horas_teoricas: { type: DataTypes.TEXT, allowNull: false },
+    horas_practicas: { type: DataTypes.TEXT, allowNull: false },
+    tipo_evaluacion: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 },
+    observaciones: { type: DataTypes.TEXT, allowNull: true },
+}, { schema: "centros", tableName: "curso_modulos", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
+sgc_curso_modulos.belongsTo(sgc_cursos, { foreignKey: 'curso_id', as: 'curso' });
+
+// ─── Metodologias (catalogo) ─────────────────────────────────────────────────
+export const sgc_metodologias = sequelize.define('metodologias', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    nombre: { type: DataTypes.TEXT, allowNull: false },
+    estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 1 },
+}, { schema: "centros", tableName: "metodologias", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
+// ─── Tipo Jornadas (catalogo) ────────────────────────────────────────────────
+export const sgc_tipo_jornadas = sequelize.define('tipo_jornadas', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    nombre: { type: DataTypes.TEXT, allowNull: false },
+    estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 1 },
+}, { schema: "centros", tableName: "tipo_jornadas", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
+// ─── Procesos Educativos ─────────────────────────────────────────────────────
+export const sgc_procesos = sequelize.define('procesos', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    codigo: { type: DataTypes.TEXT, allowNull: false },
+    centro_id: { type: DataTypes.INTEGER, allowNull: false },
+    nombre: { type: DataTypes.TEXT, allowNull: false },
+    instructor_id: { type: DataTypes.INTEGER, allowNull: false },
+    curso_id: { type: DataTypes.INTEGER, allowNull: false },
+    metodologia_id: { type: DataTypes.INTEGER, allowNull: false },
+    otra_metodologia: { type: DataTypes.TEXT, allowNull: true },
+    fecha_inicial: { type: DataTypes.DATEONLY, allowNull: false },
+    fecha_final: { type: DataTypes.DATEONLY, allowNull: false },
+    duracion_horas: { type: DataTypes.TEXT, allowNull: false },
+    tipo_jornada_id: { type: DataTypes.INTEGER, allowNull: false },
+    horario: { type: DataTypes.TEXT, allowNull: false },
+    dias: { type: DataTypes.TEXT, allowNull: false },
+    sede: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+    lugar: { type: DataTypes.TEXT, allowNull: true },
+    fuente_financiamiento_id: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+    estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 0 },
+}, { schema: "centros", tableName: "procesos", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
+sgc_procesos.belongsTo(sgc_centros, { foreignKey: 'centro_id', as: 'centro' });
+sgc_procesos.belongsTo(sgc_cursos, { foreignKey: 'curso_id', as: 'curso' });
+sgc_procesos.belongsTo(sgc_instructors, { foreignKey: 'instructor_id', as: 'instructor' });
+
+// ─── Proceso Matriculas ─────────────────────────────────────────────────────
+export const sgc_proceso_matriculas = sequelize.define('proceso_matriculas', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    proceso_id: { type: DataTypes.INTEGER, allowNull: false },
+    estudiante_id: { type: DataTypes.INTEGER, allowNull: false },
+    tipo_matricula: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 2 },
+    estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 1 },
+}, { schema: "centros", tableName: "proceso_matriculas", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
+sgc_proceso_matriculas.belongsTo(sgc_procesos, { foreignKey: 'proceso_id', as: 'proceso' });
+sgc_proceso_matriculas.belongsTo(sgc_estudiantes, { foreignKey: 'estudiante_id', as: 'estudiante' });
+
+// ─── Projects <-> Processes (pivot) ──────────────────────────────────────────
+export const projects_processes = sequelize.define('projects_processes', {
+    id: { type: DataTypes.UUID, primaryKey: true, defaultValue: Sequelize.literal('gen_random_uuid()') },
+    project_id: { type: DataTypes.UUID, allowNull: false, references: { model: 'projects', key: 'id' } },
+    process_id: { type: DataTypes.INTEGER, allowNull: false },
+}, { freezeTableName: true, timestamps: false, schema: "caderh", tableName: "projects_processes" });
+
+projects.belongsToMany(sgc_procesos, { through: projects_processes, foreignKey: 'project_id', otherKey: 'process_id', as: 'processes' });
+sgc_procesos.belongsToMany(projects, { through: projects_processes, foreignKey: 'process_id', otherKey: 'project_id', as: 'projects' });

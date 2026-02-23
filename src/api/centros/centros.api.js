@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { sequelize, user_logs, sgc_areas, sgc_departamentos, sgc_municipios, sgc_centros, sgc_instructors, sgc_estudiantes, sgc_cursos, sgc_nivel_escolaridads } from "../../utils/sequelize.js";
+import { sequelize, user_logs, sgc_areas, sgc_departamentos, sgc_municipios, sgc_centros, sgc_instructors, sgc_estudiantes, sgc_cursos, sgc_nivel_escolaridads, sgc_curso_modulos, sgc_procesos, sgc_proceso_matriculas, sgc_metodologias, sgc_tipo_jornadas } from "../../utils/sequelize.js";
 import { verify_token, is_supervisor, is_authenticated } from "../../utils/token.js";
 import { Op } from "sequelize";
 import { instructorFileUpload, buildInstructorFilePath, studentFileUpload, buildStudentFilePath } from "../../utils/upload.js";
@@ -286,6 +286,21 @@ router.get("/vive-catalogo", verify_token, is_authenticated,
     (req, res) => {
         const options = ["Padres", "Solo(a)", "Pareja", "Familiares", "Otros"];
         res.status(200).json({ data: options.map((o) => ({ value: o, label: o })) });
+    }
+);
+
+router.get("/dias-catalogo", verify_token, is_authenticated,
+    (req, res) => {
+        const dias = [
+            { value: "1", label: "Domingo" },
+            { value: "2", label: "Lunes" },
+            { value: "3", label: "Martes" },
+            { value: "4", label: "Miércoles" },
+            { value: "5", label: "Jueves" },
+            { value: "6", label: "Viernes" },
+            { value: "7", label: "Sábado" },
+        ];
+        res.status(200).json({ data: dias });
     }
 );
 
@@ -1083,6 +1098,510 @@ router.delete("/students/:id/pdf", verify_token, is_supervisor,
 
             await sgc_estudiantes.update({ pdf: null }, { where: { id } });
             await user_logs.create({ user_id: req.user_id, log: `Eliminó hoja de vida del estudiante ID: ${id}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Courses CRUD (global) ──────────────────────────────────────────────────
+
+router.get("/courses", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { limit, offset, sort, desc, search, centro_id } = req.query;
+            if (!limit || limit > 100) return res.status(400).json({ message: "Faltan campos requeridos" });
+
+            const where = {
+                estatus: 1,
+                ...(centro_id ? { centro_id: Number(centro_id) } : {}),
+                ...(search ? {
+                    [Op.or]: [
+                        { nombre: { [Op.iLike]: `%${search}%` } },
+                        { codigo_programa: { [Op.iLike]: `%${search}%` } },
+                        sequelize.where(sequelize.cast(sequelize.col('"cursos"."codigo"'), 'TEXT'), { [Op.iLike]: `%${search}%` }),
+                    ],
+                } : {}),
+            };
+
+            const result = await sgc_cursos.findAndCountAll({
+                attributes: [
+                    "id", "codigo", "centro_id", "nombre", "codigo_programa", "total_horas", "taller", "objetivo", "estatus",
+                    [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "cursos".centro_id)`), "centro_nombre"],
+                ],
+                where,
+                order: sort ? [[sort, desc === "desc" ? "DESC" : "ASC"]] : [["nombre", "ASC"]],
+                limit: Number(limit),
+                offset: Number(offset ?? 0),
+            });
+
+            res.status(200).json({ data: result.rows, count: result.count });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.get("/courses/:id", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const course = await sgc_cursos.findOne({
+                where: { id, estatus: 1 },
+                attributes: [
+                    "id", "codigo", "centro_id", "nombre", "codigo_programa", "total_horas", "taller", "objetivo",
+                    "departamento_id", "municipio_id", "comunidad",
+                    [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "cursos".centro_id)`), "centro_nombre"],
+                ],
+            });
+            if (!course) return res.status(404).json({ message: "Curso no encontrado" });
+            res.status(200).json({ data: course });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/courses", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const b = req.body;
+            if (!b.centro_id || !b.codigo || !b.nombre || !b.codigo_programa || !b.objetivo) {
+                return res.status(400).json({ message: "Faltan campos requeridos" });
+            }
+
+            const centro = await sgc_centros.findOne({ where: { id: b.centro_id } });
+            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+
+            const course = await sgc_cursos.create({
+                centro_id: Number(b.centro_id),
+                codigo: Number(b.codigo),
+                nombre: b.nombre.trim(),
+                codigo_programa: b.codigo_programa.trim(),
+                total_horas: (b.total_horas ?? "0").toString().trim(),
+                taller: b.taller ?? 1,
+                objetivo: b.objetivo.trim(),
+                departamento_id: null,
+                municipio_id: null,
+                estatus: 1,
+            });
+
+            await user_logs.create({ user_id: req.user_id, log: `Creó curso ID: ${course.id}, CENTRO: ${b.centro_id}` });
+            res.status(201).json({ ok: true, id: course.id });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.put("/courses", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const b = req.body;
+            if (!b.id || !b.codigo || !b.nombre || !b.codigo_programa || !b.objetivo) {
+                return res.status(400).json({ message: "Faltan campos requeridos" });
+            }
+
+            const course = await sgc_cursos.findOne({ where: { id: b.id, estatus: 1 } });
+            if (!course) return res.status(404).json({ message: "Curso no encontrado" });
+
+            await sgc_cursos.update({
+                codigo: Number(b.codigo),
+                nombre: b.nombre.trim(),
+                codigo_programa: b.codigo_programa.trim(),
+                taller: b.taller ?? 1,
+                objetivo: b.objetivo.trim(),
+            }, { where: { id: b.id } });
+
+            await user_logs.create({ user_id: req.user_id, log: `Actualizó curso ID: ${b.id}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.delete("/courses/:id", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const course = await sgc_cursos.findOne({ where: { id, estatus: 1 } });
+            if (!course) return res.status(404).json({ message: "Curso no encontrado" });
+
+            await sgc_cursos.update({ estatus: 0 }, { where: { id } });
+            await user_logs.create({ user_id: req.user_id, log: `Eliminó curso ID: ${id}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Course Modules CRUD ────────────────────────────────────────────────────
+
+async function recalcCourseTotalHours(courseId) {
+    const modules = await sgc_curso_modulos.findAll({ where: { curso_id: courseId } });
+    const total = modules.reduce((sum, m) => sum + (parseFloat(m.horas_teoricas) || 0) + (parseFloat(m.horas_practicas) || 0), 0);
+    await sgc_cursos.update({ total_horas: total.toString() }, { where: { id: courseId } });
+}
+
+router.get("/courses/:courseId/modules", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const courseId = Number(req.params.courseId);
+            const modules = await sgc_curso_modulos.findAll({
+                where: { curso_id: courseId },
+                attributes: ["id", "curso_id", "codigo", "nombre", "horas_teoricas", "horas_practicas", "tipo_evaluacion", "observaciones"],
+                order: [["codigo", "ASC"]],
+            });
+            res.status(200).json({ data: modules });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/courses/:courseId/modules", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const courseId = Number(req.params.courseId);
+            const b = req.body;
+            if (!b.codigo || !b.nombre || !b.horas_teoricas || !b.horas_practicas) {
+                return res.status(400).json({ message: "Faltan campos requeridos" });
+            }
+
+            const course = await sgc_cursos.findOne({ where: { id: courseId, estatus: 1 } });
+            if (!course) return res.status(404).json({ message: "Curso no encontrado" });
+
+            const mod = await sgc_curso_modulos.create({
+                curso_id: courseId,
+                codigo: b.codigo.toString().trim(),
+                nombre: b.nombre.trim(),
+                horas_teoricas: b.horas_teoricas.toString().trim(),
+                horas_practicas: b.horas_practicas.toString().trim(),
+                tipo_evaluacion: b.tipo_evaluacion ?? 1,
+                observaciones: b.observaciones?.trim() || null,
+            });
+
+            await recalcCourseTotalHours(courseId);
+            await user_logs.create({ user_id: req.user_id, log: `Creó módulo ID: ${mod.id} en curso ID: ${courseId}` });
+            res.status(201).json({ ok: true, id: mod.id });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.put("/courses/:courseId/modules", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const courseId = Number(req.params.courseId);
+            const b = req.body;
+            if (!b.id || !b.codigo || !b.nombre || !b.horas_teoricas || !b.horas_practicas) {
+                return res.status(400).json({ message: "Faltan campos requeridos" });
+            }
+
+            const mod = await sgc_curso_modulos.findOne({ where: { id: b.id, curso_id: courseId } });
+            if (!mod) return res.status(404).json({ message: "Módulo no encontrado" });
+
+            await sgc_curso_modulos.update({
+                codigo: b.codigo.toString().trim(),
+                nombre: b.nombre.trim(),
+                horas_teoricas: b.horas_teoricas.toString().trim(),
+                horas_practicas: b.horas_practicas.toString().trim(),
+                tipo_evaluacion: b.tipo_evaluacion ?? 1,
+                observaciones: b.observaciones?.trim() || null,
+            }, { where: { id: b.id, curso_id: courseId } });
+
+            await recalcCourseTotalHours(courseId);
+            await user_logs.create({ user_id: req.user_id, log: `Actualizó módulo ID: ${b.id} en curso ID: ${courseId}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.delete("/courses/:courseId/modules/:id", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const courseId = Number(req.params.courseId);
+            const { id } = req.params;
+
+            const mod = await sgc_curso_modulos.findOne({ where: { id, curso_id: courseId } });
+            if (!mod) return res.status(404).json({ message: "Módulo no encontrado" });
+
+            await sgc_curso_modulos.destroy({ where: { id, curso_id: courseId } });
+            await recalcCourseTotalHours(courseId);
+            await user_logs.create({ user_id: req.user_id, log: `Eliminó módulo ID: ${id} del curso ID: ${courseId}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Catalogs ───────────────────────────────────────────────────────────────
+
+router.get("/metodologias", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const rows = await sgc_metodologias.findAll({
+                where: { estatus: 1 },
+                attributes: ["id", "nombre"],
+                order: [["nombre", "ASC"]],
+            });
+            res.status(200).json({ data: rows });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.get("/tipo-jornadas", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const rows = await sgc_tipo_jornadas.findAll({
+                where: { estatus: 1 },
+                attributes: ["id", "nombre"],
+                order: [["nombre", "ASC"]],
+            });
+            res.status(200).json({ data: rows });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Processes CRUD (global) ────────────────────────────────────────────────
+
+router.get("/processes", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { limit, offset, sort, desc, search, centro_id } = req.query;
+            if (!limit || limit > 100) return res.status(400).json({ message: "Faltan campos requeridos" });
+
+            const where = {
+                estatus: 1,
+                ...(centro_id ? { centro_id: Number(centro_id) } : {}),
+                ...(search ? {
+                    [Op.or]: [
+                        { nombre: { [Op.iLike]: `%${search}%` } },
+                        { codigo: { [Op.iLike]: `%${search}%` } },
+                    ],
+                } : {}),
+            };
+
+            const result = await sgc_procesos.findAndCountAll({
+                attributes: [
+                    "id", "codigo", "centro_id", "nombre", "instructor_id", "curso_id",
+                    "fecha_inicial", "fecha_final", "duracion_horas", "estatus",
+                    [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "procesos".centro_id)`), "centro_nombre"],
+                    [sequelize.literal(`(SELECT cu.nombre FROM centros.cursos cu WHERE cu.id = "procesos".curso_id)`), "curso_nombre"],
+                    [sequelize.literal(`(SELECT CONCAT(i.nombres, ' ', i.apellidos) FROM centros.instructors i WHERE i.id = "procesos".instructor_id)`), "instructor_nombre"],
+                ],
+                where,
+                order: sort ? [[sort, desc === "desc" ? "DESC" : "ASC"]] : [["nombre", "ASC"]],
+                limit: Number(limit),
+                offset: Number(offset ?? 0),
+            });
+
+            res.status(200).json({ data: result.rows, count: result.count });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.get("/processes/:id", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const process = await sgc_procesos.findOne({
+                where: { id, estatus: 1 },
+                attributes: [
+                    "id", "codigo", "centro_id", "nombre", "instructor_id", "curso_id",
+                    "metodologia_id", "otra_metodologia", "fecha_inicial", "fecha_final",
+                    "duracion_horas", "tipo_jornada_id", "horario", "dias", "sede", "lugar",
+                    [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "procesos".centro_id)`), "centro_nombre"],
+                    [sequelize.literal(`(SELECT cu.nombre FROM centros.cursos cu WHERE cu.id = "procesos".curso_id)`), "curso_nombre"],
+                    [sequelize.literal(`(SELECT CONCAT(i.nombres, ' ', i.apellidos) FROM centros.instructors i WHERE i.id = "procesos".instructor_id)`), "instructor_nombre"],
+                    [sequelize.literal(`(SELECT m.nombre FROM centros.metodologias m WHERE m.id = "procesos".metodologia_id)`), "metodologia_nombre"],
+                    [sequelize.literal(`(SELECT tj.nombre FROM centros.tipo_jornadas tj WHERE tj.id = "procesos".tipo_jornada_id)`), "tipo_jornada_nombre"],
+                ],
+            });
+            if (!process) return res.status(404).json({ message: "Proceso no encontrado" });
+            res.status(200).json({ data: process });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/processes", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const b = req.body;
+            if (!b.centro_id || !b.codigo || !b.nombre || !b.instructor_id || !b.curso_id ||
+                !b.metodologia_id || !b.fecha_inicial || !b.fecha_final || !b.duracion_horas ||
+                !b.tipo_jornada_id || !b.horario || !b.dias) {
+                return res.status(400).json({ message: "Faltan campos requeridos" });
+            }
+
+            const centro = await sgc_centros.findOne({ where: { id: b.centro_id } });
+            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+
+            const process = await sgc_procesos.create({
+                codigo: b.codigo.trim(),
+                centro_id: Number(b.centro_id),
+                nombre: b.nombre.trim(),
+                instructor_id: Number(b.instructor_id),
+                curso_id: Number(b.curso_id),
+                metodologia_id: Number(b.metodologia_id),
+                otra_metodologia: b.otra_metodologia?.trim() || null,
+                fecha_inicial: b.fecha_inicial,
+                fecha_final: b.fecha_final,
+                duracion_horas: b.duracion_horas.toString().trim(),
+                tipo_jornada_id: Number(b.tipo_jornada_id),
+                horario: b.horario.trim(),
+                dias: b.dias.trim(),
+                sede: b.sede ?? 0,
+                lugar: b.lugar?.trim() || null,
+                fuente_financiamiento_id: 0,
+                estatus: 1,
+            });
+
+            await user_logs.create({ user_id: req.user_id, log: `Creó proceso educativo ID: ${process.id}, CENTRO: ${b.centro_id}` });
+            res.status(201).json({ ok: true, id: process.id });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.put("/processes", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const b = req.body;
+            if (!b.id || !b.codigo || !b.nombre || !b.instructor_id || !b.curso_id ||
+                !b.metodologia_id || !b.fecha_inicial || !b.fecha_final || !b.duracion_horas ||
+                !b.tipo_jornada_id || !b.horario || !b.dias) {
+                return res.status(400).json({ message: "Faltan campos requeridos" });
+            }
+
+            const process = await sgc_procesos.findOne({ where: { id: b.id, estatus: 1 } });
+            if (!process) return res.status(404).json({ message: "Proceso no encontrado" });
+
+            await sgc_procesos.update({
+                codigo: b.codigo.trim(),
+                nombre: b.nombre.trim(),
+                instructor_id: Number(b.instructor_id),
+                curso_id: Number(b.curso_id),
+                metodologia_id: Number(b.metodologia_id),
+                otra_metodologia: b.otra_metodologia?.trim() || null,
+                fecha_inicial: b.fecha_inicial,
+                fecha_final: b.fecha_final,
+                duracion_horas: b.duracion_horas.toString().trim(),
+                tipo_jornada_id: Number(b.tipo_jornada_id),
+                horario: b.horario.trim(),
+                dias: b.dias.trim(),
+                sede: b.sede ?? 0,
+                lugar: b.lugar?.trim() || null,
+            }, { where: { id: b.id } });
+
+            await user_logs.create({ user_id: req.user_id, log: `Actualizó proceso educativo ID: ${b.id}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.delete("/processes/:id", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const process = await sgc_procesos.findOne({ where: { id, estatus: 1 } });
+            if (!process) return res.status(404).json({ message: "Proceso no encontrado" });
+
+            await sgc_procesos.update({ estatus: 0 }, { where: { id } });
+            await user_logs.create({ user_id: req.user_id, log: `Eliminó proceso educativo ID: ${id}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Process Enrollments ────────────────────────────────────────────────────
+
+router.get("/processes/:id/enrollments", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const processId = Number(req.params.id);
+            const rows = await sgc_proceso_matriculas.findAll({
+                where: { proceso_id: processId, estatus: 1 },
+                attributes: [
+                    "id", "proceso_id", "estudiante_id", "tipo_matricula",
+                    [sequelize.literal(`(SELECT CONCAT(e.nombres, ' ', e.apellidos) FROM centros.estudiantes e WHERE e.id = "proceso_matriculas".estudiante_id)`), "estudiante_nombre"],
+                    [sequelize.literal(`(SELECT e.identidad FROM centros.estudiantes e WHERE e.id = "proceso_matriculas".estudiante_id)`), "estudiante_identidad"],
+                ],
+                order: [[sequelize.literal(`(SELECT e.nombres FROM centros.estudiantes e WHERE e.id = "proceso_matriculas".estudiante_id)`), "ASC"]],
+            });
+            res.status(200).json({ data: rows });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/processes/:id/enrollments", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const processId = Number(req.params.id);
+            const { student_ids } = req.body;
+            if (!Array.isArray(student_ids) || student_ids.length === 0) {
+                return res.status(400).json({ message: "Debe enviar al menos un estudiante" });
+            }
+
+            const process = await sgc_procesos.findOne({ where: { id: processId, estatus: 1 } });
+            if (!process) return res.status(404).json({ message: "Proceso no encontrado" });
+
+            const existing = await sgc_proceso_matriculas.findAll({
+                where: { proceso_id: processId, estudiante_id: { [Op.in]: student_ids.map(Number) }, estatus: 1 },
+                attributes: ["estudiante_id"],
+            });
+            const existingIds = existing.map(e => e.estudiante_id);
+            const newIds = student_ids.map(Number).filter(id => !existingIds.includes(id));
+
+            if (newIds.length > 0) {
+                await sgc_proceso_matriculas.bulkCreate(
+                    newIds.map(sid => ({ proceso_id: processId, estudiante_id: sid, tipo_matricula: 2, estatus: 1 }))
+                );
+            }
+
+            await user_logs.create({ user_id: req.user_id, log: `Matriculó ${newIds.length} estudiante(s) al proceso ID: ${processId}` });
+            res.status(201).json({ ok: true, enrolled: newIds.length });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.delete("/processes/:id/enrollments/:studentId", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const processId = Number(req.params.id);
+            const studentId = Number(req.params.studentId);
+
+            const enrollment = await sgc_proceso_matriculas.findOne({
+                where: { proceso_id: processId, estudiante_id: studentId, estatus: 1 },
+            });
+            if (!enrollment) return res.status(404).json({ message: "Matrícula no encontrada" });
+
+            await sgc_proceso_matriculas.update({ estatus: 0 }, { where: { id: enrollment.id } });
+            await user_logs.create({ user_id: req.user_id, log: `Desmatriculó estudiante ID: ${studentId} del proceso ID: ${processId}` });
             res.status(200).json({ ok: true });
         } catch (e) {
             next(e);
