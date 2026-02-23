@@ -282,6 +282,13 @@ router.get("/nivel-escolaridades", verify_token, is_authenticated,
     }
 );
 
+router.get("/vive-catalogo", verify_token, is_authenticated,
+    (req, res) => {
+        const options = ["Padres", "Solo(a)", "Pareja", "Familiares", "Otros"];
+        res.status(200).json({ data: options.map((o) => ({ value: o, label: o })) });
+    }
+);
+
 // ─── Instructores CRUD (por centro) ─────────────────────────────────────────
 
 router.get("/centros/:centroId/instructors", verify_token, is_authenticated,
@@ -929,6 +936,7 @@ router.get("/students/:id", verify_token, is_authenticated,
                     [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "estudiantes".centro_id)`), "centro_nombre"],
                     [sequelize.literal(`(SELECT d.nombre FROM centros.departamentos d WHERE d.id = "estudiantes".departamento_id)`), "departamento_nombre"],
                     [sequelize.literal(`(SELECT m.nombre FROM centros.municipios m WHERE m.id = "estudiantes".municipio_id)`), "municipio_nombre"],
+                    [sequelize.literal(`(SELECT n.nombre FROM centros.nivel_escolaridads n WHERE n.id::text = "estudiantes".nivel_escolaridad_id)`), "nivel_escolaridad_nombre"],
                 ],
             });
             if (!student) return res.status(404).json({ message: "Estudiante no encontrado" });
