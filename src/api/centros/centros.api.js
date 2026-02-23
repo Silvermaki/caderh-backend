@@ -449,6 +449,25 @@ router.get("/instructors", verify_token, is_authenticated,
     }
 );
 
+router.get("/instructors/:id", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const instructor = await sgc_instructors.findOne({
+                where: { id: Number(id), estatus: 1 },
+                attributes: [
+                    "id", "centro_id", "nombres", "apellidos", "titulo_obtenido", "otros_titulos", "pdf",
+                    [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "instructors".centro_id)`), "centro_nombre"],
+                ],
+            });
+            if (!instructor) return res.status(404).json({ message: "Instructor no encontrado" });
+            res.status(200).json({ data: instructor });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
 router.post("/instructors", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
