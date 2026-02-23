@@ -2,7 +2,7 @@ import { Router } from "express";
 import { sequelize, user_logs, sgc_areas, sgc_departamentos, sgc_municipios, sgc_centros, sgc_instructors, sgc_estudiantes, sgc_cursos, sgc_nivel_escolaridads } from "../../utils/sequelize.js";
 import { verify_token, is_supervisor, is_authenticated } from "../../utils/token.js";
 import { Op } from "sequelize";
-import { instructorFileUpload, buildInstructorFilePath } from "../../utils/upload.js";
+import { instructorFileUpload, buildInstructorFilePath, studentFileUpload, buildStudentFilePath } from "../../utils/upload.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -572,7 +572,7 @@ router.delete("/instructors/:id/pdf", verify_token, is_supervisor,
     }
 );
 
-// ─── Estudiantes CRUD ────────────────────────────────────────────────────────
+// ─── Estudiantes CRUD (por centro) ──────────────────────────────────────────
 
 router.get("/centros/:centroId/estudiantes", verify_token, is_authenticated,
     async (req, res, next) => {
@@ -597,10 +597,7 @@ router.get("/centros/:centroId/estudiantes", verify_token, is_authenticated,
 
             const result = await sgc_estudiantes.findAndCountAll({
                 attributes: [
-                    "id", "identidad", "nombres", "apellidos", "email", "telefono", "celular", "sexo", "estado_civil", "estatus", "created_at",
-                    "departamento_id", "municipio_id", "fecha_nacimiento", "sangre", "vive", "numero_dep", "direccion",
-                    [sequelize.literal(`(SELECT d.nombre FROM centros.departamentos d WHERE d.id = "estudiantes".departamento_id)`), "departamento_nombre"],
-                    [sequelize.literal(`(SELECT m.nombre FROM centros.municipios m WHERE m.id = "estudiantes".municipio_id)`), "municipio_nombre"],
+                    "id", "centro_id", "identidad", "nombres", "apellidos", "email", "telefono", "celular", "sexo", "pdf",
                 ],
                 where,
                 order: sort ? [[sort, desc === "desc" ? "DESC" : "ASC"]] : [["nombres", "ASC"]],
@@ -619,17 +616,38 @@ router.post("/centros/:centroId/estudiantes", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
             const centroId = Number(req.params.centroId);
-            const { identidad, nombres, apellidos, departamento_id, municipio_id, email, telefono, celular, sexo, estado_civil, fecha_nacimiento, sangre, vive, numero_dep, direccion } = req.body;
+            const b = req.body;
 
-            if (!identidad || !nombres || !apellidos || !departamento_id || !municipio_id || !sexo || !estado_civil || !sangre || !vive || !numero_dep) {
+            if (!b.identidad || !b.nombres || !b.apellidos || !b.departamento_id || !b.municipio_id || !b.sexo || !b.estado_civil || !b.vive || !b.numero_dep) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
             const estudiante = await sgc_estudiantes.create({
-                centro_id: centroId, identidad: identidad.trim(), nombres: nombres.trim(), apellidos: apellidos.trim(),
-                departamento_id, municipio_id, email: email?.trim() || null, telefono: telefono?.trim() || null,
-                celular: celular?.trim() || null, sexo, estado_civil, fecha_nacimiento: fecha_nacimiento || null,
-                sangre, vive, numero_dep, direccion: direccion?.trim() || null, estatus: 1,
+                centro_id: centroId, identidad: b.identidad.trim(), nombres: b.nombres.trim(), apellidos: b.apellidos.trim(),
+                departamento_id: b.departamento_id, municipio_id: b.municipio_id,
+                email: b.email?.trim() || null, telefono: b.telefono?.trim() || null, celular: b.celular?.trim() || null,
+                sexo: b.sexo, estado_civil: b.estado_civil, fecha_nacimiento: b.fecha_nacimiento || null,
+                sangre: "N/A", vive: b.vive, numero_dep: b.numero_dep, direccion: b.direccion?.trim() || null,
+                facebook: b.facebook?.trim() || null, twitter: b.twitter?.trim() || null, instagram: b.instagram?.trim() || null,
+                estudia: b.estudia ?? 0, nivel_escolaridad_id: b.nivel_escolaridad_id || null,
+                tiene_hijos: b.tiene_hijos ?? 0, cuantos_hijos: b.cuantos_hijos ?? 0,
+                vivienda: b.vivienda?.trim() || null, cantidad_viven: b.cantidad_viven ?? 0,
+                cantidad_trabajan_viven: b.cantidad_trabajan_viven ?? 0, cantidad_notrabajan_viven: b.cantidad_notrabajan_viven ?? 0,
+                ingreso_promedio: b.ingreso_promedio ?? 0,
+                trabajo_actual: b.trabajo_actual ?? 0, donde_trabaja: b.donde_trabaja?.trim() || null, puesto: b.puesto?.trim() || null,
+                trabajado_ant: b.trabajado_ant ?? 0, tiempo_ant: b.tiempo_ant?.trim() || null,
+                tipo_contrato_ant: b.tipo_contrato_ant ?? null, beneficios_empleo: b.beneficios_empleo?.trim() || null,
+                beneficios_empleo_otro: b.beneficios_empleo_otro?.trim() || null,
+                autoempleo: b.autoempleo ?? 0, autoempleo_dedicacion: b.autoempleo_dedicacion?.trim() || null,
+                autoempleo_otro: b.autoempleo_otro?.trim() || null, autoempleo_tiempo: b.autoempleo_tiempo?.trim() || null,
+                dias_semana_trabajo: b.dias_semana_trabajo?.trim() || null, horas_dia_trabajo: b.horas_dia_trabajo?.trim() || null,
+                socios: b.socios ?? 0, socios_cantidad: b.socios_cantidad ?? 0,
+                especial: b.especial ?? 0, discapacidad_id: b.discapacidad_id || null,
+                riesgo_social: b.riesgo_social ?? 0, etnia_id: b.etnia_id || null, interno: b.interno ?? 0,
+                nombre_r: b.nombre_r?.trim() || null, telefono_r: b.telefono_r?.trim() || null,
+                datos_r: b.datos_r?.trim() || null, parentesco_r: b.parentesco_r?.trim() || null,
+                adicional_r: b.adicional_r?.trim() || null,
+                estatus: 1,
             });
 
             await user_logs.create({ user_id: req.user_id, log: `Creó estudiante ID: ${estudiante.id}, CENTRO: ${centroId}` });
@@ -647,23 +665,43 @@ router.put("/centros/:centroId/estudiantes", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
             const centroId = Number(req.params.centroId);
-            const { id, identidad, nombres, apellidos, departamento_id, municipio_id, email, telefono, celular, sexo, estado_civil, fecha_nacimiento, sangre, vive, numero_dep, direccion } = req.body;
+            const b = req.body;
 
-            if (!id || !identidad || !nombres || !apellidos || !departamento_id || !municipio_id || !sexo || !estado_civil || !sangre || !vive || !numero_dep) {
+            if (!b.id || !b.identidad || !b.nombres || !b.apellidos || !b.departamento_id || !b.municipio_id || !b.sexo || !b.estado_civil || !b.vive || !b.numero_dep) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
-            const estudiante = await sgc_estudiantes.findOne({ where: { id, centro_id: centroId } });
+            const estudiante = await sgc_estudiantes.findOne({ where: { id: b.id, centro_id: centroId } });
             if (!estudiante) return res.status(404).json({ message: "Estudiante no encontrado" });
 
             await sgc_estudiantes.update({
-                identidad: identidad.trim(), nombres: nombres.trim(), apellidos: apellidos.trim(),
-                departamento_id, municipio_id, email: email?.trim() || null, telefono: telefono?.trim() || null,
-                celular: celular?.trim() || null, sexo, estado_civil, fecha_nacimiento: fecha_nacimiento || null,
-                sangre, vive, numero_dep, direccion: direccion?.trim() || null,
-            }, { where: { id, centro_id: centroId } });
+                identidad: b.identidad.trim(), nombres: b.nombres.trim(), apellidos: b.apellidos.trim(),
+                departamento_id: b.departamento_id, municipio_id: b.municipio_id,
+                email: b.email?.trim() || null, telefono: b.telefono?.trim() || null, celular: b.celular?.trim() || null,
+                sexo: b.sexo, estado_civil: b.estado_civil, fecha_nacimiento: b.fecha_nacimiento || null,
+                vive: b.vive, numero_dep: b.numero_dep, direccion: b.direccion?.trim() || null,
+                facebook: b.facebook?.trim() || null, twitter: b.twitter?.trim() || null, instagram: b.instagram?.trim() || null,
+                estudia: b.estudia ?? 0, nivel_escolaridad_id: b.nivel_escolaridad_id || null,
+                tiene_hijos: b.tiene_hijos ?? 0, cuantos_hijos: b.cuantos_hijos ?? 0,
+                vivienda: b.vivienda?.trim() || null, cantidad_viven: b.cantidad_viven ?? 0,
+                cantidad_trabajan_viven: b.cantidad_trabajan_viven ?? 0, cantidad_notrabajan_viven: b.cantidad_notrabajan_viven ?? 0,
+                ingreso_promedio: b.ingreso_promedio ?? 0,
+                trabajo_actual: b.trabajo_actual ?? 0, donde_trabaja: b.donde_trabaja?.trim() || null, puesto: b.puesto?.trim() || null,
+                trabajado_ant: b.trabajado_ant ?? 0, tiempo_ant: b.tiempo_ant?.trim() || null,
+                tipo_contrato_ant: b.tipo_contrato_ant ?? null, beneficios_empleo: b.beneficios_empleo?.trim() || null,
+                beneficios_empleo_otro: b.beneficios_empleo_otro?.trim() || null,
+                autoempleo: b.autoempleo ?? 0, autoempleo_dedicacion: b.autoempleo_dedicacion?.trim() || null,
+                autoempleo_otro: b.autoempleo_otro?.trim() || null, autoempleo_tiempo: b.autoempleo_tiempo?.trim() || null,
+                dias_semana_trabajo: b.dias_semana_trabajo?.trim() || null, horas_dia_trabajo: b.horas_dia_trabajo?.trim() || null,
+                socios: b.socios ?? 0, socios_cantidad: b.socios_cantidad ?? 0,
+                especial: b.especial ?? 0, discapacidad_id: b.discapacidad_id || null,
+                riesgo_social: b.riesgo_social ?? 0, etnia_id: b.etnia_id || null, interno: b.interno ?? 0,
+                nombre_r: b.nombre_r?.trim() || null, telefono_r: b.telefono_r?.trim() || null,
+                datos_r: b.datos_r?.trim() || null, parentesco_r: b.parentesco_r?.trim() || null,
+                adicional_r: b.adicional_r?.trim() || null,
+            }, { where: { id: b.id, centro_id: centroId } });
 
-            await user_logs.create({ user_id: req.user_id, log: `Actualizó estudiante ID: ${id}, CENTRO: ${centroId}` });
+            await user_logs.create({ user_id: req.user_id, log: `Actualizó estudiante ID: ${b.id}, CENTRO: ${centroId}` });
             res.status(200).json({ ok: true });
         } catch (e) {
             if (e.name === "SequelizeUniqueConstraintError") {
@@ -791,6 +829,252 @@ router.delete("/centros/:centroId/cursos/:id", verify_token, is_supervisor,
 
             await sgc_cursos.update({ estatus: 0 }, { where: { id, centro_id: centroId } });
             await user_logs.create({ user_id: req.user_id, log: `Eliminó curso ID: ${id}, CENTRO: ${centroId}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Students CRUD (global) ─────────────────────────────────────────────────
+
+const STUDENT_ALL_FIELDS = [
+    "id", "centro_id", "identidad", "nombres", "apellidos", "departamento_id", "municipio_id",
+    "direccion", "fecha_nacimiento", "estado_civil", "sexo", "email", "facebook", "telefono", "celular",
+    "estudia", "nivel_escolaridad_id", "pdf", "vive", "numero_dep", "trabajo_actual", "donde_trabaja",
+    "puesto", "especial", "discapacidad_id", "riesgo_social", "etnia_id", "interno",
+    "nombre_r", "telefono_r", "datos_r", "parentesco_r", "adicional_r",
+    "twitter", "instagram", "tiene_hijos", "cuantos_hijos", "vivienda",
+    "cantidad_viven", "cantidad_trabajan_viven", "cantidad_notrabajan_viven", "ingreso_promedio",
+    "trabajado_ant", "tiempo_ant", "tipo_contrato_ant", "beneficios_empleo", "beneficios_empleo_otro",
+    "autoempleo", "autoempleo_dedicacion", "autoempleo_otro", "autoempleo_tiempo",
+    "dias_semana_trabajo", "horas_dia_trabajo", "socios", "socios_cantidad",
+];
+
+function buildStudentBody(b) {
+    return {
+        identidad: b.identidad?.trim(), nombres: b.nombres?.trim(), apellidos: b.apellidos?.trim(),
+        departamento_id: b.departamento_id, municipio_id: b.municipio_id,
+        email: b.email?.trim() || null, telefono: b.telefono?.trim() || null, celular: b.celular?.trim() || null,
+        sexo: b.sexo, estado_civil: b.estado_civil, fecha_nacimiento: b.fecha_nacimiento || null,
+        vive: b.vive, numero_dep: b.numero_dep, direccion: b.direccion?.trim() || null,
+        facebook: b.facebook?.trim() || null, twitter: b.twitter?.trim() || null, instagram: b.instagram?.trim() || null,
+        estudia: b.estudia ?? 0, nivel_escolaridad_id: b.nivel_escolaridad_id || null,
+        tiene_hijos: b.tiene_hijos ?? 0, cuantos_hijos: b.cuantos_hijos ?? 0,
+        vivienda: b.vivienda?.trim() || null, cantidad_viven: b.cantidad_viven ?? 0,
+        cantidad_trabajan_viven: b.cantidad_trabajan_viven ?? 0, cantidad_notrabajan_viven: b.cantidad_notrabajan_viven ?? 0,
+        ingreso_promedio: b.ingreso_promedio ?? 0,
+        trabajo_actual: b.trabajo_actual ?? 0, donde_trabaja: b.donde_trabaja?.trim() || null, puesto: b.puesto?.trim() || null,
+        trabajado_ant: b.trabajado_ant ?? 0, tiempo_ant: b.tiempo_ant?.trim() || null,
+        tipo_contrato_ant: b.tipo_contrato_ant ?? null, beneficios_empleo: b.beneficios_empleo?.trim() || null,
+        beneficios_empleo_otro: b.beneficios_empleo_otro?.trim() || null,
+        autoempleo: b.autoempleo ?? 0, autoempleo_dedicacion: b.autoempleo_dedicacion?.trim() || null,
+        autoempleo_otro: b.autoempleo_otro?.trim() || null, autoempleo_tiempo: b.autoempleo_tiempo?.trim() || null,
+        dias_semana_trabajo: b.dias_semana_trabajo?.trim() || null, horas_dia_trabajo: b.horas_dia_trabajo?.trim() || null,
+        socios: b.socios ?? 0, socios_cantidad: b.socios_cantidad ?? 0,
+        especial: b.especial ?? 0, discapacidad_id: b.discapacidad_id || null,
+        riesgo_social: b.riesgo_social ?? 0, etnia_id: b.etnia_id || null, interno: b.interno ?? 0,
+        nombre_r: b.nombre_r?.trim() || null, telefono_r: b.telefono_r?.trim() || null,
+        datos_r: b.datos_r?.trim() || null, parentesco_r: b.parentesco_r?.trim() || null,
+        adicional_r: b.adicional_r?.trim() || null,
+    };
+}
+
+router.get("/students", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { limit, offset, sort, desc, search, centro_id } = req.query;
+            if (!limit || limit > 100) return res.status(400).json({ message: "Faltan campos requeridos" });
+
+            const where = {
+                estatus: 1,
+                ...(centro_id ? { centro_id: Number(centro_id) } : {}),
+                ...(search
+                    ? {
+                        [Op.or]: [
+                            { identidad: { [Op.iLike]: `%${search}%` } },
+                            { nombres: { [Op.iLike]: `%${search}%` } },
+                            { apellidos: { [Op.iLike]: `%${search}%` } },
+                        ],
+                    }
+                    : {}),
+            };
+
+            const result = await sgc_estudiantes.findAndCountAll({
+                attributes: [
+                    "id", "centro_id", "identidad", "nombres", "apellidos", "sexo", "celular", "email", "pdf",
+                    [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "estudiantes".centro_id)`), "centro_nombre"],
+                ],
+                where,
+                order: sort ? [[sort, desc === "desc" ? "DESC" : "ASC"]] : [["nombres", "ASC"]],
+                limit: Number(limit),
+                offset: Number(offset ?? 0),
+            });
+
+            res.status(200).json({ data: result.rows, count: result.count });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.get("/students/:id", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const student = await sgc_estudiantes.findOne({
+                where: { id, estatus: 1 },
+                attributes: [
+                    ...STUDENT_ALL_FIELDS,
+                    [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "estudiantes".centro_id)`), "centro_nombre"],
+                    [sequelize.literal(`(SELECT d.nombre FROM centros.departamentos d WHERE d.id = "estudiantes".departamento_id)`), "departamento_nombre"],
+                    [sequelize.literal(`(SELECT m.nombre FROM centros.municipios m WHERE m.id = "estudiantes".municipio_id)`), "municipio_nombre"],
+                ],
+            });
+            if (!student) return res.status(404).json({ message: "Estudiante no encontrado" });
+            res.status(200).json({ data: student });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/students", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const b = req.body;
+            if (!b.centro_id || !b.identidad || !b.nombres || !b.apellidos || !b.departamento_id || !b.municipio_id || !b.sexo || !b.estado_civil || !b.vive || !b.numero_dep) {
+                return res.status(400).json({ message: "Faltan campos requeridos" });
+            }
+
+            const centro = await sgc_centros.findOne({ where: { id: b.centro_id } });
+            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+
+            const student = await sgc_estudiantes.create({
+                centro_id: b.centro_id, sangre: "N/A", estatus: 1, ...buildStudentBody(b),
+            });
+
+            await user_logs.create({ user_id: req.user_id, log: `Creó estudiante ID: ${student.id}, CENTRO: ${b.centro_id}` });
+            res.status(201).json({ ok: true, id: student.id });
+        } catch (e) {
+            if (e.name === "SequelizeUniqueConstraintError") {
+                return res.status(400).json({ message: "Ya existe un estudiante con esta identidad en este centro" });
+            }
+            next(e);
+        }
+    }
+);
+
+router.put("/students", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const b = req.body;
+            if (!b.id || !b.identidad || !b.nombres || !b.apellidos || !b.departamento_id || !b.municipio_id || !b.sexo || !b.estado_civil || !b.vive || !b.numero_dep) {
+                return res.status(400).json({ message: "Faltan campos requeridos" });
+            }
+
+            const student = await sgc_estudiantes.findOne({ where: { id: b.id, estatus: 1 } });
+            if (!student) return res.status(404).json({ message: "Estudiante no encontrado" });
+
+            await sgc_estudiantes.update(buildStudentBody(b), { where: { id: b.id } });
+
+            await user_logs.create({ user_id: req.user_id, log: `Actualizó estudiante ID: ${b.id}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            if (e.name === "SequelizeUniqueConstraintError") {
+                return res.status(400).json({ message: "Ya existe un estudiante con esta identidad en este centro" });
+            }
+            next(e);
+        }
+    }
+);
+
+router.delete("/students/:id", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const student = await sgc_estudiantes.findOne({ where: { id, estatus: 1 } });
+            if (!student) return res.status(404).json({ message: "Estudiante no encontrado" });
+
+            await sgc_estudiantes.update({ estatus: 0 }, { where: { id } });
+            await user_logs.create({ user_id: req.user_id, log: `Eliminó estudiante ID: ${id}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Student PDF (hoja de vida) ─────────────────────────────────────────────
+
+router.post("/students/:id/pdf", verify_token, is_supervisor,
+    (req, res, next) => {
+        studentFileUpload.single("file")(req, res, (err) => {
+            if (err) {
+                if (err.code === "LIMIT_FILE_SIZE") return res.status(400).json({ message: "Archivo excede 10MB" });
+                return res.status(400).json({ message: err.message || "Error al subir archivo" });
+            }
+            next();
+        });
+    },
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            if (!req.file) return res.status(400).json({ message: "No se envió un archivo" });
+
+            const student = await sgc_estudiantes.findOne({ where: { id, estatus: 1 } });
+            if (!student) return res.status(404).json({ message: "Estudiante no encontrado" });
+
+            if (student.pdf) {
+                const oldPath = path.join(__dirname, "../../files", student.pdf);
+                if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+            }
+
+            const relativePath = buildStudentFilePath(id, req.file.originalname);
+            const fullPath = path.join(__dirname, "../../files", relativePath);
+            fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+            fs.writeFileSync(fullPath, req.file.buffer);
+
+            await sgc_estudiantes.update({ pdf: relativePath }, { where: { id } });
+
+            await user_logs.create({ user_id: req.user_id, log: `Subió hoja de vida para estudiante ID: ${id}` });
+            res.status(200).json({ ok: true, pdf: relativePath });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.get("/students/:id/pdf", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const student = await sgc_estudiantes.findOne({ where: { id, estatus: 1 }, attributes: ["pdf"] });
+            if (!student || !student.pdf) return res.status(404).json({ message: "Archivo no encontrado" });
+
+            const fullPath = path.join(__dirname, "../../files", student.pdf);
+            if (!fs.existsSync(fullPath)) return res.status(404).json({ message: "Archivo no encontrado en el servidor" });
+
+            res.sendFile(path.resolve(fullPath));
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.delete("/students/:id/pdf", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const student = await sgc_estudiantes.findOne({ where: { id, estatus: 1 }, attributes: ["id", "pdf"] });
+            if (!student) return res.status(404).json({ message: "Estudiante no encontrado" });
+            if (!student.pdf) return res.status(404).json({ message: "El estudiante no tiene hoja de vida" });
+
+            const fullPath = path.join(__dirname, "../../files", student.pdf);
+            if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+
+            await sgc_estudiantes.update({ pdf: null }, { where: { id } });
+            await user_logs.create({ user_id: req.user_id, log: `Eliminó hoja de vida del estudiante ID: ${id}` });
             res.status(200).json({ ok: true });
         } catch (e) {
             next(e);

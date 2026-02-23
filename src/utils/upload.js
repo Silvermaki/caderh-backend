@@ -36,6 +36,18 @@ export function buildInstructorFilePath(instructorId, originalName) {
     return path.join("instructors", String(instructorId), "cv" + safeExt);
 }
 
+export const studentFileUpload = multer({
+    storage: multer.memoryStorage(),
+    fileFilter,
+    limits: { fileSize: MAX_FILE_SIZE },
+});
+
+export function buildStudentFilePath(studentId, originalName) {
+    const ext = path.extname(originalName).toLowerCase();
+    const safeExt = ALLOWED_EXTENSIONS.includes(ext) ? ext : ".bin";
+    return path.join("students", String(studentId), "cv" + safeExt);
+}
+
 export function sanitizeFilename(name) {
     return name.replace(/[/\\?%*:|"<>]/g, "_").replace(/\.\./g, "");
 }
