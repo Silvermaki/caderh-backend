@@ -1284,6 +1284,41 @@ router.get("/projects/:id/processes", verify_token, is_authenticated,
     }
 );
 
+router.get("/projects/:id/processes/stats", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const project = await projects.findOne({ where: { id } });
+            if (!project || project.project_status === 'DELETED') {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+
+            const [stats] = await sequelize.query(`
+                WITH linked AS (
+                    SELECT p.id AS process_id, p.centro_id
+                    FROM caderh.projects_processes pp
+                    JOIN centros.procesos p ON p.id = pp.process_id AND p.estatus = 1
+                    WHERE pp.project_id = :projectId
+                ),
+                enrollments AS (
+                    SELECT pm.proceso_id, pm.estudiante_id
+                    FROM centros.proceso_matriculas pm
+                    WHERE pm.estatus = 1 AND pm.proceso_id IN (SELECT process_id FROM linked)
+                )
+                SELECT
+                    (SELECT COUNT(*)::int FROM linked) AS total_processes,
+                    (SELECT COUNT(*)::int FROM enrollments) AS total_participants,
+                    (SELECT COUNT(DISTINCT estudiante_id)::int FROM enrollments) AS unique_students,
+                    (SELECT COUNT(DISTINCT centro_id)::int FROM linked) AS centros_count
+            `, { replacements: { projectId: id }, type: sequelize.QueryTypes.SELECT });
+
+            res.status(200).json({ data: stats ?? { total_processes: 0, total_participants: 0, unique_students: 0, centros_count: 0 } });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
 router.post("/projects/:id/processes", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
