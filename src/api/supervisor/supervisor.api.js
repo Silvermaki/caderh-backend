@@ -1,7 +1,7 @@
 import { Router } from "express";
 import path from "path";
 import fs from "fs";
-import { sequelize, users, user_logs, financing_sources, projects, project_financing_sources, project_donations, project_expenses, project_files, project_beneficiaries, project_logs, expense_categories, projects_agents } from "../../utils/sequelize.js";
+import { sequelize, users, user_logs, financing_sources, projects, project_financing_sources, project_donations, project_expenses, project_files, project_beneficiaries, project_logs, expense_categories, projects_agents, projects_processes } from "../../utils/sequelize.js";
 import { projectFileUpload, buildProjectFilePath } from "../../utils/upload.js";
 import { verify_token, is_supervisor, is_authenticated, check_project_assignment } from "../../utils/token.js";
 import { Op } from "sequelize";
@@ -1245,6 +1245,97 @@ router.patch("/projects/:id/assign", verify_token, is_supervisor,
                 log: ids.length > 0
                     ? `Asignó ${ids.length} agente(s) al proyecto`
                     : `Desasignó todos los agentes del proyecto`,
+            });
+
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Projects <-> Processes (beneficiarios) ─────────────────────────────────
+
+router.get("/projects/:id/processes", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const project = await projects.findOne({ where: { id } });
+            if (!project || project.project_status === 'DELETED') {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+
+            const rows = await sequelize.query(`
+                SELECT p.id, p.codigo, p.nombre, p.fecha_inicial, p.fecha_final,
+                    (SELECT c.nombre FROM centros.centros c WHERE c.id = p.centro_id) AS centro_nombre,
+                    (SELECT cu.nombre FROM centros.cursos cu WHERE cu.id = p.curso_id) AS curso_nombre,
+                    (SELECT CONCAT(i.nombres, ' ', i.apellidos) FROM centros.instructors i WHERE i.id = p.instructor_id) AS instructor_nombre,
+                    (SELECT COUNT(*) FROM centros.proceso_matriculas pm WHERE pm.proceso_id = p.id AND pm.estatus = 1)::int AS enrolled_count
+                FROM caderh.projects_processes pp
+                JOIN centros.procesos p ON p.id = pp.process_id
+                WHERE pp.project_id = :projectId AND p.estatus = 1
+                ORDER BY p.nombre ASC
+            `, { replacements: { projectId: id }, type: sequelize.QueryTypes.SELECT });
+
+            res.status(200).json({ data: rows });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/projects/:id/processes", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const { process_ids } = req.body;
+
+            const project = await projects.findOne({ where: { id } });
+            if (!project || project.project_status === 'DELETED') {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+
+            const ids = Array.isArray(process_ids) ? process_ids.filter(Boolean).map(Number) : [];
+            if (ids.length === 0) return res.status(400).json({ message: "Debe seleccionar al menos un proceso" });
+
+            await projects_processes.bulkCreate(
+                ids.map((process_id) => ({ project_id: id, process_id })),
+                { ignoreDuplicates: true }
+            );
+
+            await project_logs.create({
+                user_id: req.user_id,
+                project_id: id,
+                log: `Vinculó ${ids.length} proceso(s) educativo(s) al proyecto`,
+            });
+
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.delete("/projects/:id/processes/:processId", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id, processId } = req.params;
+
+            const project = await projects.findOne({ where: { id } });
+            if (!project || project.project_status === 'DELETED') {
+                return res.status(404).json({ message: "Proyecto no encontrado" });
+            }
+
+            const deleted = await projects_processes.destroy({
+                where: { project_id: id, process_id: Number(processId) },
+            });
+
+            if (!deleted) return res.status(404).json({ message: "Relación no encontrada" });
+
+            await project_logs.create({
+                user_id: req.user_id,
+                project_id: id,
+                log: `Desvinculó proceso educativo ID: ${processId} del proyecto`,
             });
 
             res.status(200).json({ ok: true });

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { sequelize, user_logs, sgc_areas, sgc_departamentos, sgc_municipios, sgc_centros, sgc_instructors, sgc_estudiantes, sgc_cursos, sgc_nivel_escolaridads, sgc_curso_modulos, sgc_procesos, sgc_proceso_matriculas, sgc_metodologias, sgc_tipo_jornadas } from "../../utils/sequelize.js";
+import { sequelize, user_logs, sgc_areas, sgc_departamentos, sgc_municipios, sgc_centros, sgc_instructors, sgc_estudiantes, sgc_cursos, sgc_nivel_escolaridads, sgc_curso_modulos, sgc_procesos, sgc_proceso_matriculas, sgc_metodologias, sgc_tipo_jornadas, projects_processes, projects } from "../../utils/sequelize.js";
 import { verify_token, is_supervisor, is_authenticated } from "../../utils/token.js";
 import { Op } from "sequelize";
 import { instructorFileUpload, buildInstructorFilePath, studentFileUpload, buildStudentFilePath } from "../../utils/upload.js";
@@ -1621,6 +1621,72 @@ router.delete("/processes/:id/enrollments/:studentId", verify_token, is_supervis
 
             await sgc_proceso_matriculas.update({ estatus: 0 }, { where: { id: enrollment.id } });
             await user_logs.create({ user_id: req.user_id, log: `Desmatriculó estudiante ID: ${studentId} del proceso ID: ${processId}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Processes <-> Projects (proyectos relacionados) ────────────────────────
+
+router.get("/processes/:id/projects", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const processId = Number(req.params.id);
+
+            const rows = await sequelize.query(`
+                SELECT p.id, p.name, p.description, p.project_status, p.project_category,
+                    p.start_date, p.end_date
+                FROM caderh.projects_processes pp
+                JOIN caderh.projects p ON p.id = pp.project_id
+                WHERE pp.process_id = :processId AND p.project_status != 'DELETED'
+                ORDER BY p.name ASC
+            `, { replacements: { processId }, type: sequelize.QueryTypes.SELECT });
+
+            res.status(200).json({ data: rows });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/processes/:id/projects", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const processId = Number(req.params.id);
+            const { project_ids } = req.body;
+
+            const process_ = await sgc_procesos.findOne({ where: { id: processId, estatus: 1 } });
+            if (!process_) return res.status(404).json({ message: "Proceso no encontrado" });
+
+            const ids = Array.isArray(project_ids) ? project_ids.filter(Boolean) : [];
+            if (ids.length === 0) return res.status(400).json({ message: "Debe seleccionar al menos un proyecto" });
+
+            await projects_processes.bulkCreate(
+                ids.map((project_id) => ({ project_id, process_id: processId })),
+                { ignoreDuplicates: true }
+            );
+
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.delete("/processes/:id/projects/:projectId", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const processId = Number(req.params.id);
+            const { projectId } = req.params;
+
+            const deleted = await projects_processes.destroy({
+                where: { project_id: projectId, process_id: processId },
+            });
+
+            if (!deleted) return res.status(404).json({ message: "Relación no encontrada" });
+
             res.status(200).json({ ok: true });
         } catch (e) {
             next(e);
