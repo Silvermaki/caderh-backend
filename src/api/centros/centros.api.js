@@ -943,13 +943,14 @@ router.get("/students", verify_token, is_authenticated,
 
             const result = await sgc_estudiantes.findAndCountAll({
                 attributes: [
-                    "id", "centro_id", "identidad", "nombres", "apellidos", "sexo", "celular", "email", "pdf",
+                    "id", "centro_id", "identidad", "nombres", "apellidos", "sexo", "celular", "email", "pdf", "fecha_nacimiento",
                     [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "estudiantes".centro_id)`), "centro_nombre"],
                 ],
                 where,
                 order: sort ? [[sort, desc === "desc" ? "DESC" : "ASC"]] : [["nombres", "ASC"]],
                 limit: Number(limit),
                 offset: Number(offset ?? 0),
+                raw: true,
             });
 
             res.status(200).json({ data: result.rows, count: result.count });
