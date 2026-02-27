@@ -247,6 +247,50 @@ router.get("/centros/:id", verify_token, is_authenticated,
     }
 );
 
+// Update centro general info
+router.put("/centros/:id", verify_token, is_supervisor,
+    async (req, res, next) => {
+        try {
+            const { id } = req.params;
+            const b = req.body;
+
+            if (!b.nombre || !b.siglas || !b.codigo || !b.departamento_id || !b.municipio_id) {
+                return res.status(400).json({ message: "Faltan campos requeridos" });
+            }
+
+            const centro = await sgc_centros.findOne({ where: { id } });
+            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+
+            await sgc_centros.update({
+                nombre: b.nombre.trim(),
+                siglas: b.siglas.trim(),
+                codigo: b.codigo.trim(),
+                descripcion: b.descripcion?.trim() || null,
+                departamento_id: b.departamento_id,
+                municipio_id: b.municipio_id,
+                direccion: b.direccion?.trim() || null,
+                telefono: b.telefono?.trim() || null,
+                email: b.email?.trim() || null,
+                pagina_web: b.pagina_web?.trim() || null,
+                facebook: b.facebook?.trim() || null,
+                twitter: b.twitter?.trim() || null,
+                nombre_director: b.nombre_director?.trim() || null,
+                telefono_director: b.telefono_director?.trim() || null,
+                email_director: b.email_director?.trim() || null,
+                nombre_contacto: b.nombre_contacto?.trim() || null,
+                telefono_contacto: b.telefono_contacto?.trim() || null,
+                email_contacto: b.email_contacto?.trim() || null,
+                puesto_contacto: b.puesto_contacto?.trim() || null,
+            }, { where: { id } });
+
+            await user_logs.create({ user_id: req.user_id, log: `Actualizó centro ID: ${id}` });
+            res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
 // ─── Centro Summary (mini-dashboard) ─────────────────────────────────────────
 
 router.get("/centros/:id/summary", verify_token, is_authenticated,
