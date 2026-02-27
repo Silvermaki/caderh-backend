@@ -638,12 +638,13 @@ router.get("/centros/:centroId/estudiantes", verify_token, is_authenticated,
 
             const result = await sgc_estudiantes.findAndCountAll({
                 attributes: [
-                    "id", "centro_id", "identidad", "nombres", "apellidos", "email", "telefono", "celular", "sexo", "pdf",
+                    "id", "centro_id", "identidad", "nombres", "apellidos", "email", "telefono", "celular", "sexo", "pdf", "fecha_nacimiento",
                 ],
                 where,
                 order: sort ? [[sort, desc === "desc" ? "DESC" : "ASC"]] : [["nombres", "ASC"]],
                 limit: Number(limit),
                 offset: Number(offset ?? 0),
+                raw: true,
             });
 
             res.status(200).json({ data: result.rows, count: result.count });
