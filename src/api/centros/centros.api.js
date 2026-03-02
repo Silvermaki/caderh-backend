@@ -3,6 +3,14 @@ import { sequelize, user_logs, sgc_areas, sgc_departamentos, sgc_municipios, sgc
 import { verify_token, is_supervisor, is_authenticated } from "../../utils/token.js";
 import { Op } from "sequelize";
 import { instructorFileUpload, buildInstructorFilePath, studentFileUpload, buildStudentFilePath } from "../../utils/upload.js";
+import multer from "multer";
+import {
+    generateInstructorsExcel, parseInstructorsExcel,
+    generateStudentsExcel, parseStudentsExcel,
+    generateCoursesExcel, parseCoursesExcel,
+    generateProcessesExcel, parseProcessesExcel,
+    validateMunicipioDepartamento,
+} from "../../utils/excel-centros.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -1735,6 +1743,482 @@ router.delete("/processes/:id/projects/:projectId", verify_token, is_supervisor,
             if (!deleted) return res.status(404).json({ message: "Relación no encontrada" });
 
             res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Excel Import / Export
+// ═══════════════════════════════════════════════════════════════════════════
+
+const excelUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+async function loadCatalogosBase() {
+    const [departamentos, municipios, nivelEscolaridades] = await Promise.all([
+        sgc_departamentos.findAll({ where: { estatus: 1 }, attributes: ["id", "nombre"], order: [["nombre", "ASC"]], raw: true }),
+        sgc_municipios.findAll({ where: { estatus: 1 }, attributes: ["id", "nombre", "departamento_id"], order: [["nombre", "ASC"]], raw: true }),
+        sgc_nivel_escolaridads.findAll({ where: { estatus: 1 }, attributes: ["id", "nombre"], order: [["nombre", "ASC"]], raw: true }),
+    ]);
+    return { departamentos, municipios, nivelEscolaridades };
+}
+
+// ─── Excel: Instructores ────────────────────────────────────────────────────
+
+router.get("/centros/:centroId/excel/instructors", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const centroId = Number(req.params.centroId);
+            const centro = await sgc_centros.findOne({ where: { id: centroId } });
+            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+
+            const rows = await sgc_instructors.findAll({ where: { centro_id: centroId, estatus: 1 }, raw: true });
+            const catalogs = await loadCatalogosBase();
+
+            const protectedRows = await sgc_procesos.findAll({
+                where: { estatus: 1 },
+                attributes: [[sequelize.fn("DISTINCT", sequelize.col("instructor_id")), "instructor_id"]],
+                raw: true,
+            });
+            const protectedIds = protectedRows.map((r) => r.instructor_id);
+
+            const wb = generateInstructorsExcel(rows, catalogs, protectedIds);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            res.setHeader("Content-Disposition", "attachment; filename=plantilla-instructores.xlsx");
+            return wb.write("plantilla-instructores.xlsx", res);
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/centros/:centroId/excel/instructors", verify_token, is_supervisor, excelUpload.single("file"),
+    async (req, res, next) => {
+        try {
+            const centroId = Number(req.params.centroId);
+            const centro = await sgc_centros.findOne({ where: { id: centroId } });
+            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+            if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
+
+            const { parsed, errors } = parseInstructorsExcel(req.file.buffer);
+
+            const allMunicipios = await sgc_municipios.findAll({ where: { estatus: 1 }, attributes: ["id", "departamento_id"], raw: true });
+            const munDeptErrors = validateMunicipioDepartamento(parsed, allMunicipios);
+            munDeptErrors.forEach((e) => errors.push({ row: null, message: e.message }));
+
+            const validRows = parsed.filter((r) => !munDeptErrors.find((e) => e.id === r.id && r.id));
+
+            const existingRows = await sgc_instructors.findAll({ where: { centro_id: centroId, estatus: 1 }, attributes: ["id"], raw: true });
+            const existingIds = new Set(existingRows.map((r) => r.id));
+            const excelIds = new Set(validRows.filter((r) => r.id).map((r) => r.id));
+
+            const protectedRows = await sgc_procesos.findAll({
+                where: { instructor_id: { [Op.in]: [...existingIds] }, estatus: 1 },
+                attributes: [[sequelize.fn("DISTINCT", sequelize.col("instructor_id")), "instructor_id"]],
+                raw: true,
+            });
+            const protectedIds = new Set(protectedRows.map((r) => r.instructor_id));
+
+            let created = 0, updated = 0, deleted = 0;
+            const warnings = [];
+
+            for (const existing of existingRows) {
+                if (!excelIds.has(existing.id)) {
+                    if (protectedIds.has(existing.id)) {
+                        warnings.push({ id: existing.id, message: `Instructor ID ${existing.id} está protegido (tiene procesos asignados) y no fue eliminado` });
+                    } else {
+                        await sgc_instructors.update({ estatus: 0 }, { where: { id: existing.id, centro_id: centroId } });
+                        deleted++;
+                    }
+                }
+            }
+
+            for (const row of validRows) {
+                try {
+                    if (row.id && existingIds.has(row.id)) {
+                        const { id, ...data } = row;
+                        await sgc_instructors.update(data, { where: { id, centro_id: centroId } });
+                        updated++;
+                    } else {
+                        await sgc_instructors.create({ ...row, id: undefined, centro_id: centroId, estatus: 1 });
+                        created++;
+                    }
+                } catch (err) {
+                    errors.push({ row: null, message: `Error en instructor "${row.nombres} ${row.apellidos}": ${err.message}` });
+                }
+            }
+
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Importó instructores por Excel en centro ${centroId} (${created} creados, ${updated} actualizados, ${deleted} eliminados, ${warnings.length} protegidos)`,
+            });
+
+            res.status(200).json({ ok: true, created, updated, deleted, warnings, errors, processed: created + updated });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Excel: Estudiantes ─────────────────────────────────────────────────────
+
+router.get("/centros/:centroId/excel/students", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const centroId = Number(req.params.centroId);
+            const centro = await sgc_centros.findOne({ where: { id: centroId } });
+            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+
+            const rows = await sgc_estudiantes.findAll({ where: { centro_id: centroId, estatus: 1 }, raw: true });
+            const catalogs = await loadCatalogosBase();
+
+            const protectedRows = await sgc_proceso_matriculas.findAll({
+                where: { estatus: 1 },
+                attributes: [[sequelize.fn("DISTINCT", sequelize.col("estudiante_id")), "estudiante_id"]],
+                raw: true,
+            });
+            const protectedIds = protectedRows.map((r) => r.estudiante_id);
+
+            const wb = generateStudentsExcel(rows, catalogs, protectedIds);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            res.setHeader("Content-Disposition", "attachment; filename=plantilla-estudiantes.xlsx");
+            return wb.write("plantilla-estudiantes.xlsx", res);
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, excelUpload.single("file"),
+    async (req, res, next) => {
+        try {
+            const centroId = Number(req.params.centroId);
+            const centro = await sgc_centros.findOne({ where: { id: centroId } });
+            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+            if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
+
+            const { parsed, errors } = parseStudentsExcel(req.file.buffer);
+
+            const allMunicipios = await sgc_municipios.findAll({ where: { estatus: 1 }, attributes: ["id", "departamento_id"], raw: true });
+            const munDeptErrors = validateMunicipioDepartamento(parsed, allMunicipios);
+            munDeptErrors.forEach((e) => errors.push({ row: null, message: e.message }));
+
+            const existingRows = await sgc_estudiantes.findAll({
+                where: { centro_id: centroId, estatus: 1 },
+                attributes: ["id", "identidad"],
+                raw: true,
+            });
+            const existingIds = new Set(existingRows.map((r) => r.id));
+            const existingIdentidades = new Map(existingRows.map((r) => [r.identidad, r.id]));
+            const excelIds = new Set(parsed.filter((r) => r.id).map((r) => r.id));
+
+            // Validate unique identidad within excel + existing
+            const seenIdentidades = new Map();
+            const validRows = [];
+            for (const row of parsed) {
+                const hasError = munDeptErrors.find((e) => e.id === row.id && row.id);
+                if (hasError) continue;
+
+                if (seenIdentidades.has(row.identidad)) {
+                    errors.push({ row: null, message: `Identidad "${row.identidad}" duplicada en el Excel` });
+                    continue;
+                }
+                seenIdentidades.set(row.identidad, true);
+
+                // Check if identidad already belongs to a different student in this centro
+                const existingStudentId = existingIdentidades.get(row.identidad);
+                if (existingStudentId && (!row.id || row.id !== existingStudentId)) {
+                    errors.push({ row: null, message: `Identidad "${row.identidad}" ya existe para estudiante ID ${existingStudentId} en este centro` });
+                    continue;
+                }
+
+                validRows.push(row);
+            }
+
+            const protectedRows = await sgc_proceso_matriculas.findAll({
+                where: { estudiante_id: { [Op.in]: [...existingIds] }, estatus: 1 },
+                attributes: [[sequelize.fn("DISTINCT", sequelize.col("estudiante_id")), "estudiante_id"]],
+                raw: true,
+            });
+            const protectedIds = new Set(protectedRows.map((r) => r.estudiante_id));
+
+            let created = 0, updated = 0, deleted = 0;
+            const warnings = [];
+
+            for (const existing of existingRows) {
+                if (!excelIds.has(existing.id)) {
+                    if (protectedIds.has(existing.id)) {
+                        warnings.push({ id: existing.id, message: `Estudiante ID ${existing.id} (${existing.identidad}) está protegido (tiene matrículas) y no fue eliminado` });
+                    } else {
+                        await sgc_estudiantes.update({ estatus: 0 }, { where: { id: existing.id, centro_id: centroId } });
+                        deleted++;
+                    }
+                }
+            }
+
+            for (const row of validRows) {
+                try {
+                    if (row.id && existingIds.has(row.id)) {
+                        const { id, ...data } = row;
+                        await sgc_estudiantes.update(data, { where: { id, centro_id: centroId } });
+                        updated++;
+                    } else {
+                        await sgc_estudiantes.create({ ...row, id: undefined, centro_id: centroId, estatus: 1 });
+                        created++;
+                    }
+                } catch (err) {
+                    errors.push({ row: null, message: `Error en estudiante "${row.nombres} ${row.apellidos}": ${err.message}` });
+                }
+            }
+
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Importó estudiantes por Excel en centro ${centroId} (${created} creados, ${updated} actualizados, ${deleted} eliminados, ${warnings.length} protegidos)`,
+            });
+
+            res.status(200).json({ ok: true, created, updated, deleted, warnings, errors, processed: created + updated });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Excel: Cursos ──────────────────────────────────────────────────────────
+
+router.get("/centros/:centroId/excel/courses", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const centroId = Number(req.params.centroId);
+            const centro = await sgc_centros.findOne({ where: { id: centroId } });
+            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+
+            const rows = await sgc_cursos.findAll({ where: { centro_id: centroId, estatus: 1 }, raw: true });
+            const catalogs = await loadCatalogosBase();
+
+            const protectedRows = await sgc_procesos.findAll({
+                where: { estatus: 1 },
+                attributes: [[sequelize.fn("DISTINCT", sequelize.col("curso_id")), "curso_id"]],
+                raw: true,
+            });
+            const protectedIds = protectedRows.map((r) => r.curso_id);
+
+            const wb = generateCoursesExcel(rows, catalogs, protectedIds);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            res.setHeader("Content-Disposition", "attachment; filename=plantilla-cursos.xlsx");
+            return wb.write("plantilla-cursos.xlsx", res);
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/centros/:centroId/excel/courses", verify_token, is_supervisor, excelUpload.single("file"),
+    async (req, res, next) => {
+        try {
+            const centroId = Number(req.params.centroId);
+            const centro = await sgc_centros.findOne({ where: { id: centroId } });
+            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+            if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
+
+            const { parsed, errors } = parseCoursesExcel(req.file.buffer);
+
+            const existingRows = await sgc_cursos.findAll({ where: { centro_id: centroId, estatus: 1 }, attributes: ["id"], raw: true });
+            const existingIds = new Set(existingRows.map((r) => r.id));
+            const excelIds = new Set(parsed.filter((r) => r.id).map((r) => r.id));
+
+            const protectedRows = await sgc_procesos.findAll({
+                where: { curso_id: { [Op.in]: [...existingIds] }, estatus: 1 },
+                attributes: [[sequelize.fn("DISTINCT", sequelize.col("curso_id")), "curso_id"]],
+                raw: true,
+            });
+            const protectedIds = new Set(protectedRows.map((r) => r.curso_id));
+
+            let created = 0, updated = 0, deleted = 0;
+            const warnings = [];
+
+            for (const existing of existingRows) {
+                if (!excelIds.has(existing.id)) {
+                    if (protectedIds.has(existing.id)) {
+                        warnings.push({ id: existing.id, message: `Curso ID ${existing.id} está protegido (tiene procesos asignados) y no fue eliminado` });
+                    } else {
+                        await sgc_cursos.update({ estatus: 0 }, { where: { id: existing.id, centro_id: centroId } });
+                        deleted++;
+                    }
+                }
+            }
+
+            for (const row of parsed) {
+                try {
+                    if (row.id && existingIds.has(row.id)) {
+                        const { id, ...data } = row;
+                        await sgc_cursos.update(data, { where: { id, centro_id: centroId } });
+                        updated++;
+                    } else {
+                        await sgc_cursos.create({ ...row, id: undefined, centro_id: centroId, estatus: 1 });
+                        created++;
+                    }
+                } catch (err) {
+                    errors.push({ row: null, message: `Error en curso "${row.nombre}": ${err.message}` });
+                }
+            }
+
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Importó cursos por Excel en centro ${centroId} (${created} creados, ${updated} actualizados, ${deleted} eliminados, ${warnings.length} protegidos)`,
+            });
+
+            res.status(200).json({ ok: true, created, updated, deleted, warnings, errors, processed: created + updated });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Excel: Procesos Educativos ─────────────────────────────────────────────
+
+router.get("/centros/:centroId/excel/processes", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const centroId = Number(req.params.centroId);
+            const centro = await sgc_centros.findOne({ where: { id: centroId } });
+            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+
+            const rows = await sgc_procesos.findAll({ where: { centro_id: centroId, estatus: 1 }, raw: true });
+
+            const [instructores, cursos, metodologias, tipoJornadas] = await Promise.all([
+                sgc_instructors.findAll({ where: { centro_id: centroId, estatus: 1 }, attributes: ["id", "nombres", "apellidos"], raw: true }),
+                sgc_cursos.findAll({ where: { centro_id: centroId, estatus: 1 }, attributes: ["id", "nombre"], raw: true }),
+                sgc_metodologias.findAll({ where: { estatus: 1 }, attributes: ["id", "nombre"], raw: true }),
+                sgc_tipo_jornadas.findAll({ where: { estatus: 1 }, attributes: ["id", "nombre"], raw: true }),
+            ]);
+
+            const catalogs = { instructores, cursos, metodologias, tipoJornadas };
+
+            // Protected if has enrollments or linked projects
+            const [matRows, projRows] = await Promise.all([
+                sgc_proceso_matriculas.findAll({
+                    where: { estatus: 1 },
+                    attributes: [[sequelize.fn("DISTINCT", sequelize.col("proceso_id")), "proceso_id"]],
+                    raw: true,
+                }),
+                projects_processes.findAll({
+                    attributes: [[sequelize.fn("DISTINCT", sequelize.col("process_id")), "process_id"]],
+                    raw: true,
+                }),
+            ]);
+            const protectedIds = [...new Set([...matRows.map((r) => r.proceso_id), ...projRows.map((r) => r.process_id)])];
+
+            const wb = generateProcessesExcel(rows, catalogs, protectedIds);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            res.setHeader("Content-Disposition", "attachment; filename=plantilla-procesos.xlsx");
+            return wb.write("plantilla-procesos.xlsx", res);
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/centros/:centroId/excel/processes", verify_token, is_supervisor, excelUpload.single("file"),
+    async (req, res, next) => {
+        try {
+            const centroId = Number(req.params.centroId);
+            const centro = await sgc_centros.findOne({ where: { id: centroId } });
+            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+            if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
+
+            const { parsed, errors } = parseProcessesExcel(req.file.buffer);
+
+            // Validate FK references
+            const [validInstructors, validCourses, validMetodologias, validJornadas] = await Promise.all([
+                sgc_instructors.findAll({ where: { centro_id: centroId, estatus: 1 }, attributes: ["id"], raw: true }),
+                sgc_cursos.findAll({ where: { centro_id: centroId, estatus: 1 }, attributes: ["id"], raw: true }),
+                sgc_metodologias.findAll({ where: { estatus: 1 }, attributes: ["id"], raw: true }),
+                sgc_tipo_jornadas.findAll({ where: { estatus: 1 }, attributes: ["id"], raw: true }),
+            ]);
+            const instSet = new Set(validInstructors.map((r) => r.id));
+            const cursoSet = new Set(validCourses.map((r) => r.id));
+            const metSet = new Set(validMetodologias.map((r) => r.id));
+            const tjSet = new Set(validJornadas.map((r) => r.id));
+
+            const validRows = [];
+            for (const row of parsed) {
+                let hasErr = false;
+                if (!instSet.has(row.instructor_id)) {
+                    errors.push({ row: null, message: `Instructor ID ${row.instructor_id} no encontrado en este centro (proceso "${row.nombre}")` });
+                    hasErr = true;
+                }
+                if (!cursoSet.has(row.curso_id)) {
+                    errors.push({ row: null, message: `Curso ID ${row.curso_id} no encontrado en este centro (proceso "${row.nombre}")` });
+                    hasErr = true;
+                }
+                if (!metSet.has(row.metodologia_id)) {
+                    errors.push({ row: null, message: `Metodología ID ${row.metodologia_id} no encontrada (proceso "${row.nombre}")` });
+                    hasErr = true;
+                }
+                if (!tjSet.has(row.tipo_jornada_id)) {
+                    errors.push({ row: null, message: `Tipo Jornada ID ${row.tipo_jornada_id} no encontrada (proceso "${row.nombre}")` });
+                    hasErr = true;
+                }
+                if (!hasErr) validRows.push(row);
+            }
+
+            const existingRows = await sgc_procesos.findAll({ where: { centro_id: centroId, estatus: 1 }, attributes: ["id"], raw: true });
+            const existingIds = new Set(existingRows.map((r) => r.id));
+            const excelIds = new Set(validRows.filter((r) => r.id).map((r) => r.id));
+
+            const [matRows, projRows] = await Promise.all([
+                sgc_proceso_matriculas.findAll({
+                    where: { proceso_id: { [Op.in]: [...existingIds] }, estatus: 1 },
+                    attributes: [[sequelize.fn("DISTINCT", sequelize.col("proceso_id")), "proceso_id"]],
+                    raw: true,
+                }),
+                projects_processes.findAll({
+                    where: { process_id: { [Op.in]: [...existingIds] } },
+                    attributes: [[sequelize.fn("DISTINCT", sequelize.col("process_id")), "process_id"]],
+                    raw: true,
+                }),
+            ]);
+            const protectedIds = new Set([...matRows.map((r) => r.proceso_id), ...projRows.map((r) => r.process_id)]);
+
+            let created = 0, updated = 0, deleted = 0;
+            const warnings = [];
+
+            for (const existing of existingRows) {
+                if (!excelIds.has(existing.id)) {
+                    if (protectedIds.has(existing.id)) {
+                        warnings.push({ id: existing.id, message: `Proceso ID ${existing.id} está protegido (tiene matrículas o proyectos) y no fue eliminado` });
+                    } else {
+                        await sgc_procesos.update({ estatus: 0 }, { where: { id: existing.id } });
+                        deleted++;
+                    }
+                }
+            }
+
+            for (const row of validRows) {
+                try {
+                    if (row.id && existingIds.has(row.id)) {
+                        const { id, ...data } = row;
+                        await sgc_procesos.update(data, { where: { id } });
+                        updated++;
+                    } else {
+                        await sgc_procesos.create({
+                            ...row, id: undefined, centro_id: centroId,
+                            fuente_financiamiento_id: 0, estatus: 1,
+                        });
+                        created++;
+                    }
+                } catch (err) {
+                    errors.push({ row: null, message: `Error en proceso "${row.nombre}": ${err.message}` });
+                }
+            }
+
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Importó procesos por Excel en centro ${centroId} (${created} creados, ${updated} actualizados, ${deleted} eliminados, ${warnings.length} protegidos)`,
+            });
+
+            res.status(200).json({ ok: true, created, updated, deleted, warnings, errors, processed: created + updated });
         } catch (e) {
             next(e);
         }
