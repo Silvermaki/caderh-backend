@@ -1,6 +1,15 @@
 import { Sequelize, DataTypes } from "sequelize";
 import fs from 'fs';
 
+const sslMode = process.env.PGSSLMODE || 'verify-full';
+const dialectOptions = {};
+
+if (sslMode !== 'disable') {
+    dialectOptions.ssl = sslMode === 'no-verify'
+        ? { rejectUnauthorized: false }
+        : { rejectUnauthorized: true, ca: fs.readFileSync('src/certificates/us-east-1-bundle.pem').toString() };
+}
+
 export const sequelize = new Sequelize(process.env.PGDATABASE, process.env.PGUSER, process.env.PGPASSWORD, {
     host: process.env.PGHOST,
     dialect: 'postgres',
@@ -10,12 +19,7 @@ export const sequelize = new Sequelize(process.env.PGDATABASE, process.env.PGUSE
         acquire: 30000,
         idle: 10000
     },
-    dialectOptions: {
-        ssl: {
-            rejectUnauthorized: true,
-            ca: fs.readFileSync('src/certificates/us-east-1-bundle.pem').toString()
-        }
-    }
+    dialectOptions,
 });
 
 export const users = sequelize.define('users', {
