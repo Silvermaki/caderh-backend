@@ -461,11 +461,11 @@ export function parseInstructorsExcel(buffer) {
         if (!apellidos) { errors.push({ row: rowNum, message: "Apellidos es requerido" }); return; }
 
         parsed.push({
-            id, identidad: identidad || "N/A", nombres, apellidos,
-            sexo: sexo || "N/A", estado_civil: estado_civil || "N/A",
-            fecha_nacimiento, departamento_id: departamento_id ?? 0, municipio_id: municipio_id ?? 0,
+            id, identidad: identidad || null, nombres, apellidos,
+            sexo: sexo || null, estado_civil: estado_civil || null,
+            fecha_nacimiento, departamento_id: departamento_id || null, municipio_id: municipio_id || null,
             direccion, email, telefono, celular,
-            nivel_escolaridad_id: nivel_escolaridad_id ?? 0, titulo_obtenido, otros_titulos,
+            nivel_escolaridad_id: nivel_escolaridad_id || null, titulo_obtenido, otros_titulos,
         });
     });
 
@@ -509,7 +509,7 @@ export function parseStudentsExcel(buffer) {
         parsed.push({
             id, identidad, nombres, apellidos, sexo, estado_civil,
             fecha_nacimiento: strOrNull(row["Fecha Nacimiento"]),
-            sangre: strOrNull(row["Tipo Sangre"]) || "N/A",
+            sangre: strOrNull(row["Tipo Sangre"]),
             departamento_id, municipio_id,
             direccion: strOrNull(row["Direccion"]),
             email: strOrNull(row["Email"]), telefono: strOrNull(row["Telefono"]), celular: strOrNull(row["Celular"]),
@@ -569,14 +569,13 @@ export function parseCoursesExcel(buffer) {
         const taller = intOrNull(row["Taller"]);
         const objetivo = strOrNull(row["Objetivo"]);
 
-        if (codigo === "" || codigo === null || codigo === undefined) { errors.push({ row: rowNum, message: "Codigo es requerido" }); return; }
         if (!nombre) { errors.push({ row: rowNum, message: "Nombre es requerido" }); return; }
         if (!codigo_programa) { errors.push({ row: rowNum, message: "Codigo Programa es requerido" }); return; }
         if (!objetivo) { errors.push({ row: rowNum, message: "Objetivo es requerido" }); return; }
 
         parsed.push({
             id,
-            codigo: Number.isInteger(Number(codigo)) ? Number(codigo) : codigo,
+            codigo: (codigo !== "" && codigo !== null && codigo !== undefined) ? (Number.isInteger(Number(codigo)) ? Number(codigo) : codigo) : null,
             nombre, codigo_programa,
             taller: taller ?? 1, objetivo,
             departamento_id: intOrNull(row["Departamento ID"]),

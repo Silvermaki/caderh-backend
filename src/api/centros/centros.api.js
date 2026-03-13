@@ -406,7 +406,6 @@ router.post("/centros/:centroId/instructors", verify_token, is_supervisor,
 
             const instructor = await sgc_instructors.create({
                 centro_id: centroId, nombres: nombres.trim(), apellidos: apellidos.trim(),
-                identidad: "N/A", departamento_id: 0, municipio_id: 0, sexo: "N/A", estado_civil: "N/A",
                 titulo_obtenido: titulo_obtenido?.trim() || null, otros_titulos: otros_titulos?.trim() || null,
                 estatus: 1,
             });
@@ -534,7 +533,6 @@ router.post("/instructors", verify_token, is_supervisor,
 
             const instructor = await sgc_instructors.create({
                 centro_id, nombres: nombres.trim(), apellidos: apellidos.trim(),
-                identidad: "N/A", departamento_id: 0, municipio_id: 0, sexo: "N/A", estado_civil: "N/A",
                 titulo_obtenido: titulo_obtenido?.trim() || null, otros_titulos: otros_titulos?.trim() || null,
                 estatus: 1,
             });
@@ -721,7 +719,7 @@ router.post("/centros/:centroId/estudiantes", verify_token, is_supervisor,
                 departamento_id: b.departamento_id, municipio_id: b.municipio_id,
                 email: b.email?.trim() || null, telefono: b.telefono?.trim() || null, celular: b.celular?.trim() || null,
                 sexo: b.sexo, estado_civil: b.estado_civil, fecha_nacimiento: b.fecha_nacimiento || null,
-                sangre: "N/A", vive: b.vive, numero_dep: b.numero_dep, direccion: b.direccion?.trim() || null,
+                vive: b.vive, numero_dep: b.numero_dep, direccion: b.direccion?.trim() || null,
                 facebook: b.facebook?.trim() || null, twitter: b.twitter?.trim() || null, instagram: b.instagram?.trim() || null,
                 estudia: b.estudia ?? 0, nivel_escolaridad_id: b.nivel_escolaridad_id || null,
                 tiene_hijos: b.tiene_hijos ?? 0, cuantos_hijos: b.cuantos_hijos ?? 0,
@@ -869,13 +867,13 @@ router.post("/centros/:centroId/cursos", verify_token, is_supervisor,
             const centroId = Number(req.params.centroId);
             const { codigo, nombre, codigo_programa, total_horas, taller, objetivo, departamento_id, municipio_id } = req.body;
 
-            if (!codigo || !nombre || !codigo_programa || !total_horas || !objetivo) {
+            if (!nombre || !codigo_programa || !objetivo) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
             const curso = await sgc_cursos.create({
-                centro_id: centroId, codigo: Number(codigo), nombre: nombre.trim(), codigo_programa: codigo_programa.trim(),
-                total_horas: total_horas.toString().trim(), taller: taller ?? 1, objetivo: objetivo.trim(),
+                centro_id: centroId, codigo: codigo ? Number(codigo) : null, nombre: nombre.trim(), codigo_programa: codigo_programa.trim(),
+                total_horas: total_horas?.toString().trim() || '0', taller: taller ?? 1, objetivo: objetivo.trim(),
                 departamento_id: departamento_id || null, municipio_id: municipio_id || null, estatus: 1,
             });
 
@@ -893,7 +891,7 @@ router.put("/centros/:centroId/cursos", verify_token, is_supervisor,
             const centroId = Number(req.params.centroId);
             const { id, codigo, nombre, codigo_programa, total_horas, taller, objetivo, departamento_id, municipio_id } = req.body;
 
-            if (!id || !codigo || !nombre || !codigo_programa || !total_horas || !objetivo) {
+            if (!id || !nombre || !codigo_programa || !objetivo) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
@@ -901,8 +899,8 @@ router.put("/centros/:centroId/cursos", verify_token, is_supervisor,
             if (!curso) return res.status(404).json({ message: "Curso no encontrado" });
 
             await sgc_cursos.update({
-                codigo: Number(codigo), nombre: nombre.trim(), codigo_programa: codigo_programa.trim(),
-                total_horas: total_horas.toString().trim(), taller: taller ?? 1, objetivo: objetivo.trim(),
+                codigo: codigo ? Number(codigo) : null, nombre: nombre.trim(), codigo_programa: codigo_programa.trim(),
+                total_horas: total_horas?.toString().trim() || '0', taller: taller ?? 1, objetivo: objetivo.trim(),
                 departamento_id: departamento_id || null, municipio_id: municipio_id || null,
             }, { where: { id, centro_id: centroId } });
 
@@ -1047,7 +1045,7 @@ router.post("/students", verify_token, is_supervisor,
             if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
 
             const student = await sgc_estudiantes.create({
-                centro_id: b.centro_id, sangre: "N/A", estatus: 1, ...buildStudentBody(b),
+                centro_id: b.centro_id, estatus: 1, ...buildStudentBody(b),
             });
 
             await user_logs.create({ user_id: req.user_id, log: `Creó estudiante ID: ${student.id}, CENTRO: ${b.centro_id}` });
@@ -1240,7 +1238,7 @@ router.post("/courses", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
             const b = req.body;
-            if (!b.centro_id || !b.codigo || !b.nombre || !b.codigo_programa || !b.objetivo) {
+            if (!b.centro_id || !b.nombre || !b.codigo_programa || !b.objetivo) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
@@ -1249,7 +1247,7 @@ router.post("/courses", verify_token, is_supervisor,
 
             const course = await sgc_cursos.create({
                 centro_id: Number(b.centro_id),
-                codigo: Number(b.codigo),
+                codigo: b.codigo ? Number(b.codigo) : null,
                 nombre: b.nombre.trim(),
                 codigo_programa: b.codigo_programa.trim(),
                 total_horas: (b.total_horas ?? "0").toString().trim(),
@@ -1272,7 +1270,7 @@ router.put("/courses", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
             const b = req.body;
-            if (!b.id || !b.codigo || !b.nombre || !b.codigo_programa || !b.objetivo) {
+            if (!b.id || !b.nombre || !b.codigo_programa || !b.objetivo) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
@@ -1280,7 +1278,7 @@ router.put("/courses", verify_token, is_supervisor,
             if (!course) return res.status(404).json({ message: "Curso no encontrado" });
 
             await sgc_cursos.update({
-                codigo: Number(b.codigo),
+                codigo: b.codigo ? Number(b.codigo) : null,
                 nombre: b.nombre.trim(),
                 codigo_programa: b.codigo_programa.trim(),
                 taller: b.taller ?? 1,
@@ -1542,7 +1540,6 @@ router.post("/processes", verify_token, is_supervisor,
                 dias: b.dias.trim(),
                 sede: b.sede ?? 0,
                 lugar: b.lugar?.trim() || null,
-                fuente_financiamiento_id: 0,
                 estatus: 1,
             });
 
@@ -2204,7 +2201,7 @@ router.post("/centros/:centroId/excel/processes", verify_token, is_supervisor, e
                     } else {
                         await sgc_procesos.create({
                             ...row, id: undefined, centro_id: centroId,
-                            fuente_financiamiento_id: 0, estatus: 1,
+                            estatus: 1,
                         });
                         created++;
                     }
