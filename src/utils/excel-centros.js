@@ -11,6 +11,12 @@ function createStyles(wb) {
             border: { bottom: { style: "thin", color: "000000" }, top: { style: "thin", color: "000000" }, left: { style: "thin", color: "000000" }, right: { style: "thin", color: "000000" } },
             alignment: { horizontal: "center", vertical: "center", wrapText: true },
         }),
+        headerRequired: wb.createStyle({
+            font: { bold: true, size: 11, color: "FFFFFF" },
+            fill: { type: "pattern", patternType: "solid", fgColor: "8B0000" },
+            border: { bottom: { style: "thin", color: "000000" }, top: { style: "thin", color: "000000" }, left: { style: "thin", color: "000000" }, right: { style: "thin", color: "000000" } },
+            alignment: { horizontal: "center", vertical: "center", wrapText: true },
+        }),
         catalogHeader: wb.createStyle({
             font: { bold: true, size: 11, color: "FFFFFF" },
             fill: { type: "pattern", patternType: "solid", fgColor: "375623" },
@@ -124,15 +130,16 @@ export function generateInstructorsExcel(rows, catalogs, protectedIds) {
     const neMap = Object.fromEntries((catalogs.nivelEscolaridades ?? []).map((n) => [n.id, n.nombre]));
 
     const headers = [
-        "ID", "Protegido", "Identidad", "Nombres", "Apellidos", "Sexo", "Estado Civil",
+        "ID", "Protegido", "Identidad", "Nombres*", "Apellidos*", "Sexo", "Estado Civil",
         "Fecha Nacimiento", "Departamento ID", "Departamento", "Municipio ID", "Municipio",
         "Direccion", "Email", "Telefono", "Celular",
         "Nivel Escolaridad ID", "Nivel Escolaridad", "Titulo Obtenido", "Otros Titulos",
     ];
     const widths = [10, 12, 18, 22, 22, 10, 16, 16, 16, 22, 14, 22, 30, 25, 16, 16, 18, 22, 25, 25];
     const refCols = new Set([9, 11, 17]); // 0-indexed cols that are reference (Departamento, Municipio, Nivel Escolaridad names)
+    const requiredCols = new Set([3, 4]);
 
-    headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(s.header));
+    headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(requiredCols.has(i) ? s.headerRequired : s.header));
     widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
     ws.row(1).freeze();
 
@@ -188,12 +195,12 @@ export function generateStudentsExcel(rows, catalogs, protectedIds) {
     const neMap = Object.fromEntries((catalogs.nivelEscolaridades ?? []).map((n) => [n.id, n.nombre]));
 
     const headers = [
-        "ID", "Protegido", "Identidad", "Nombres", "Apellidos", "Sexo", "Estado Civil",
+        "ID", "Protegido", "Identidad*", "Nombres*", "Apellidos*", "Sexo*", "Estado Civil*",
         "Fecha Nacimiento", "Tipo Sangre",
-        "Departamento ID", "Departamento", "Municipio ID", "Municipio", "Direccion",
+        "Departamento ID*", "Departamento", "Municipio ID*", "Municipio", "Direccion",
         "Email", "Telefono", "Celular", "Facebook", "Instagram", "Twitter",
         "Estudia", "Nivel Escolaridad ID", "Nivel Escolaridad",
-        "Vive", "Num. Dependientes",
+        "Vive*", "Num. Dependientes*",
         "Tiene Hijos", "Cuantos Hijos", "Vivienda", "Cant. Viven", "Cant. Trabajan", "Cant. No Trabajan", "Ingreso Promedio",
         "Trabajo Actual", "Donde Trabaja", "Puesto",
         "Trabajado Ant.", "Tiempo Ant.", "Tipo Contrato Ant.",
@@ -219,8 +226,9 @@ export function generateStudentsExcel(rows, catalogs, protectedIds) {
         22, 16, 20, 16, 20,
     ];
     const refCols = new Set([10, 12, 22]); // Departamento name, Municipio name, Nivel Escolaridad name
+    const requiredCols = new Set([2, 3, 4, 5, 6, 9, 11, 23, 24]);
 
-    headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(s.header));
+    headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(requiredCols.has(i) ? s.headerRequired : s.header));
     widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
     ws.row(1).freeze();
 
@@ -288,14 +296,15 @@ export function generateCoursesExcel(rows, catalogs, protectedIds) {
     const munMap = Object.fromEntries((catalogs.municipios ?? []).map((m) => [m.id, m.nombre]));
 
     const headers = [
-        "ID", "Protegido", "Codigo", "Nombre", "Codigo Programa", "Taller",
-        "Total Horas", "Objetivo",
+        "ID", "Protegido", "Codigo", "Nombre*", "Codigo Programa*", "Taller",
+        "Total Horas", "Objetivo*",
         "Departamento ID", "Departamento", "Municipio ID", "Municipio", "Comunidad",
     ];
     const widths = [10, 12, 12, 30, 18, 10, 14, 40, 16, 22, 14, 22, 22];
     const refCols = new Set([6, 9, 11]); // Total Horas (readonly), Departamento name, Municipio name
+    const requiredCols = new Set([3, 4, 7]);
 
-    headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(s.header));
+    headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(requiredCols.has(i) ? s.headerRequired : s.header));
     widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
     ws.row(1).freeze();
 
@@ -348,17 +357,18 @@ export function generateProcessesExcel(rows, catalogs, protectedIds) {
     const tjMap = Object.fromEntries((catalogs.tipoJornadas ?? []).map((t) => [t.id, t.nombre]));
 
     const headers = [
-        "ID", "Protegido", "Codigo", "Nombre",
-        "Instructor ID", "Instructor", "Curso ID", "Curso",
-        "Metodologia ID", "Metodologia", "Otra Metodologia",
-        "Fecha Inicial", "Fecha Final", "Duracion Horas",
-        "Tipo Jornada ID", "Tipo Jornada",
-        "Horario", "Dias", "Sede", "Lugar",
+        "ID", "Protegido", "Codigo*", "Nombre*",
+        "Instructor ID*", "Instructor", "Curso ID*", "Curso",
+        "Metodologia ID*", "Metodologia", "Otra Metodologia",
+        "Fecha Inicial*", "Fecha Final*", "Duracion Horas*",
+        "Tipo Jornada ID*", "Tipo Jornada",
+        "Horario*", "Dias*", "Sede", "Lugar",
     ];
     const widths = [10, 12, 14, 30, 14, 30, 12, 30, 16, 22, 22, 14, 14, 14, 16, 22, 20, 20, 12, 25];
     const refCols = new Set([5, 7, 9, 15]); // Instructor name, Curso name, Metodologia name, Tipo Jornada name
+    const requiredCols = new Set([2, 3, 4, 6, 8, 11, 12, 13, 14, 16, 17]);
 
-    headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(s.header));
+    headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(requiredCols.has(i) ? s.headerRequired : s.header));
     widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
     ws.row(1).freeze();
 
@@ -410,7 +420,14 @@ export function generateProcessesExcel(rows, catalogs, protectedIds) {
 function readFirstSheet(buffer) {
     const workbook = XLSX.read(buffer, { type: "buffer" });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    return XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    return rows.map(row => {
+        const clean = {};
+        for (const [key, val] of Object.entries(row)) {
+            clean[key.replace(/\*$/, "")] = val;
+        }
+        return clean;
+    });
 }
 
 function intOrNull(val) {
