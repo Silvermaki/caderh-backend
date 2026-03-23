@@ -8,8 +8,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
-    "migrate": "node-pg-migrate --no-reject-unauthorized",
-    "migrate:local": "node-pg-migrate"
+    "migrate": "node-pg-migrate",
+    "migrate:ssl": "node-pg-migrate --no-reject-unauthorized"
   },
   "author": "CADERH",
   "license": "ISC",
