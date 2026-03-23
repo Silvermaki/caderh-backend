@@ -9,6 +9,7 @@ import {
     generateStudentsExcel, parseStudentsExcel,
     generateCoursesExcel, parseCoursesExcel,
     generateProcessesExcel, parseProcessesExcel,
+    generateModulesExcel, parseModulesExcel,
     validateMunicipioDepartamento,
 } from "../../utils/excel-centros.js";
 import path from "path";
@@ -1413,6 +1414,164 @@ router.delete("/courses/:courseId/modules/:id", verify_token, is_supervisor,
     }
 );
 
+const excelUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+// ─── Wizard: Create course + modules in one call ─────────────────────────────
+
+router.post("/courses/wizard", verify_token, is_supervisor,
+    async (req, res, next) => {
+        const t = await sequelize.transaction();
+        try {
+            const b = req.body;
+            if (!b.centro_id || !b.nombre || !b.codigo_programa || !b.objetivo) {
+                await t.rollback();
+                return res.status(400).json({ message: "Faltan campos requeridos del curso" });
+            }
+
+            const centro = await sgc_centros.findOne({ where: { id: b.centro_id } });
+            if (!centro) { await t.rollback(); return res.status(404).json({ message: "Centro no encontrado" }); }
+
+            const course = await sgc_cursos.create({
+                centro_id: Number(b.centro_id),
+                codigo: b.codigo ? Number(b.codigo) : null,
+                nombre: b.nombre.trim(),
+                codigo_programa: b.codigo_programa.trim(),
+                total_horas: "0",
+                taller: b.taller ?? 1,
+                objetivo: b.objetivo.trim(),
+                departamento_id: null,
+                municipio_id: null,
+                estatus: 1,
+            }, { transaction: t });
+
+            let modulesCreated = 0;
+            const moduleErrors = [];
+            const modules = Array.isArray(b.modules) ? b.modules : [];
+
+            for (const item of modules) {
+                try {
+                    if (!item.codigo || !item.nombre || !item.horas_teoricas || !item.horas_practicas) {
+                        moduleErrors.push({ message: `Módulo "${item.nombre || "sin nombre"}" tiene campos requeridos vacíos` });
+                        continue;
+                    }
+                    await sgc_curso_modulos.create({
+                        curso_id: course.id,
+                        codigo: item.codigo,
+                        nombre: item.nombre,
+                        horas_teoricas: item.horas_teoricas,
+                        horas_practicas: item.horas_practicas,
+                        tipo_evaluacion: item.tipo_evaluacion ?? 1,
+                        observaciones: item.observaciones || null,
+                    }, { transaction: t });
+                    modulesCreated++;
+                } catch (err) {
+                    moduleErrors.push({ message: `Error en módulo "${item.nombre}": ${err.message}` });
+                }
+            }
+
+            if (modulesCreated > 0) {
+                const mods = await sgc_curso_modulos.findAll({ where: { curso_id: course.id }, transaction: t, raw: true });
+                const total = mods.reduce((sum, m) => sum + (parseFloat(m.horas_teoricas) || 0) + (parseFloat(m.horas_practicas) || 0), 0);
+                await sgc_cursos.update({ total_horas: String(total) }, { where: { id: course.id }, transaction: t });
+            }
+
+            await t.commit();
+
+            await user_logs.create({ user_id: req.user_id, log: `Creó curso ID: ${course.id} con ${modulesCreated} módulo(s) por wizard, CENTRO: ${b.centro_id}` });
+            res.status(201).json({ ok: true, id: course.id, modulesCreated, moduleErrors });
+        } catch (e) {
+            await t.rollback();
+            next(e);
+        }
+    }
+);
+
+// ─── Excel: Plantilla vacía de módulos (para wizard) ─────────────────────────
+
+router.get("/courses/excel/modules-template", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const wb = generateModulesExcel([]);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            res.setHeader("Content-Disposition", "attachment; filename=plantilla-modulos.xlsx");
+            return wb.write("plantilla-modulos.xlsx", res);
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Excel: Módulos de Curso ─────────────────────────────────────────────────
+
+router.get("/courses/:courseId/excel/modules", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const courseId = Number(req.params.courseId);
+            const course = await sgc_cursos.findOne({ where: { id: courseId, estatus: 1 } });
+            if (!course) return res.status(404).json({ message: "Curso no encontrado" });
+
+            const rows = await sgc_curso_modulos.findAll({ where: { curso_id: courseId }, order: [["codigo", "ASC"]], raw: true });
+            const wb = generateModulesExcel(rows);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            res.setHeader("Content-Disposition", "attachment; filename=plantilla-modulos.xlsx");
+            return wb.write("plantilla-modulos.xlsx", res);
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/courses/:courseId/excel/modules", verify_token, is_supervisor, excelUpload.single("file"),
+    async (req, res, next) => {
+        try {
+            const courseId = Number(req.params.courseId);
+            const course = await sgc_cursos.findOne({ where: { id: courseId, estatus: 1 } });
+            if (!course) return res.status(404).json({ message: "Curso no encontrado" });
+            if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
+
+            const { parsed, errors } = parseModulesExcel(req.file.buffer);
+
+            const existingRows = await sgc_curso_modulos.findAll({ where: { curso_id: courseId }, attributes: ["id"], raw: true });
+            const existingIds = new Set(existingRows.map((r) => r.id));
+            const excelIds = new Set(parsed.filter((r) => r.id).map((r) => r.id));
+
+            let created = 0, updated = 0, deleted = 0;
+
+            for (const existing of existingRows) {
+                if (!excelIds.has(existing.id)) {
+                    await sgc_curso_modulos.destroy({ where: { id: existing.id, curso_id: courseId } });
+                    deleted++;
+                }
+            }
+
+            for (const row of parsed) {
+                try {
+                    if (row.id && existingIds.has(row.id)) {
+                        const { id, ...data } = row;
+                        await sgc_curso_modulos.update(data, { where: { id, curso_id: courseId } });
+                        updated++;
+                    } else {
+                        await sgc_curso_modulos.create({ ...row, id: undefined, curso_id: courseId, tipo_evaluacion: row.tipo_evaluacion ?? 1 });
+                        created++;
+                    }
+                } catch (err) {
+                    errors.push({ row: null, message: `Error en módulo "${row.nombre}": ${err.message}` });
+                }
+            }
+
+            await recalcCourseTotalHours(courseId);
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Importó módulos por Excel en curso ${courseId} (${created} creados, ${updated} actualizados, ${deleted} eliminados)`,
+            });
+
+            res.status(200).json({ ok: true, created, updated, deleted, errors, processed: created + updated });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
 // ─── Catalogs ───────────────────────────────────────────────────────────────
 
 router.get("/metodologias", verify_token, is_authenticated,
@@ -1749,8 +1908,6 @@ router.delete("/processes/:id/projects/:projectId", verify_token, is_supervisor,
 // ═══════════════════════════════════════════════════════════════════════════
 // Excel Import / Export
 // ═══════════════════════════════════════════════════════════════════════════
-
-const excelUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 async function loadCatalogosBase() {
     const [departamentos, municipios, nivelEscolaridades] = await Promise.all([

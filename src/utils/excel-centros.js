@@ -678,3 +678,86 @@ export function validateMunicipioDepartamento(parsedRows, municipios, fieldPrefi
 
     return warnings;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GENERATE: Módulos de Curso
+// ═══════════════════════════════════════════════════════════════════════════
+
+export function generateModulesExcel(rows) {
+    const wb = new xl.Workbook();
+    const s = createStyles(wb);
+    const ws = wb.addWorksheet("Modulos");
+
+    const headers = [
+        "ID", "Codigo*", "Nombre*", "Horas Teoricas*", "Horas Practicas*",
+        "Tipo Evaluacion", "Observaciones",
+    ];
+    const widths = [10, 14, 30, 16, 16, 16, 40];
+    const requiredCols = new Set([1, 2, 3, 4]); // Codigo, Nombre, Horas Teoricas, Horas Practicas
+
+    headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(requiredCols.has(i) ? s.headerRequired : s.header));
+    widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
+    ws.row(1).freeze();
+
+    rows.forEach((r, idx) => {
+        const row = idx + 2;
+        const isAlt = idx % 2 !== 0;
+        const base = isAlt ? s.cellAlt : s.cell;
+
+        const EVAL_MAP = { 1: "Teorica", 2: "Practica", 3: "Mixta" };
+
+        const vals = [
+            r.id, r.codigo, r.nombre,
+            r.horas_teoricas || "", r.horas_practicas || "",
+            EVAL_MAP[r.tipo_evaluacion] ?? "", r.observaciones || "",
+        ];
+
+        vals.forEach((val, col) => writeCell(ws, row, col + 1, val, base));
+    });
+
+    writeCatalogSheet(wb, s, "Catalogo Tipo Evaluacion",
+        ["Valor", "Descripcion"],
+        [["Teorica", "Evaluación teórica"], ["Practica", "Evaluación práctica"], ["Mixta", "Evaluación mixta"]],
+        [12, 30],
+    );
+
+    return wb;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PARSE: Módulos de Curso
+// ═══════════════════════════════════════════════════════════════════════════
+
+export function parseModulesExcel(buffer) {
+    const jsonRows = readFirstSheet(buffer);
+    const parsed = [];
+    const errors = [];
+
+    const EVAL_TYPE_MAP = {
+        "TEORICA": 1, "TEÓRICA": 1, "1": 1,
+        "PRACTICA": 2, "PRÁCTICA": 2, "2": 2,
+        "MIXTA": 3, "3": 3,
+    };
+
+    jsonRows.forEach((row, idx) => {
+        const rowNum = idx + 2;
+        const id = intOrNull(row["ID"]);
+        const codigo = strOrNull(row["Codigo"]);
+        const nombre = strOrNull(row["Nombre"]);
+        const horas_teoricas = strOrNull(row["Horas Teoricas"]);
+        const horas_practicas = strOrNull(row["Horas Practicas"]);
+        const rawEval = strOrNull(row["Tipo Evaluacion"]);
+        const observaciones = strOrNull(row["Observaciones"]);
+
+        if (!codigo) { errors.push({ row: rowNum, message: "Codigo es requerido" }); return; }
+        if (!nombre) { errors.push({ row: rowNum, message: "Nombre es requerido" }); return; }
+        if (!horas_teoricas) { errors.push({ row: rowNum, message: "Horas Teoricas es requerido" }); return; }
+        if (!horas_practicas) { errors.push({ row: rowNum, message: "Horas Practicas es requerido" }); return; }
+
+        const tipo_evaluacion = rawEval ? (EVAL_TYPE_MAP[String(rawEval).toUpperCase().trim()] ?? 1) : 1;
+
+        parsed.push({ id, codigo, nombre, horas_teoricas, horas_practicas, tipo_evaluacion, observaciones });
+    });
+
+    return { parsed, errors };
+}
