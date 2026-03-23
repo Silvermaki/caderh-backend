@@ -10,6 +10,7 @@ import {
     generateCoursesExcel, parseCoursesExcel,
     generateProcessesExcel, parseProcessesExcel,
     generateModulesExcel, parseModulesExcel,
+    generateEnrollmentsExcel, parseEnrollmentsExcel,
     validateMunicipioDepartamento,
 } from "../../utils/excel-centros.js";
 import path from "path";
@@ -510,6 +511,7 @@ router.get("/instructors/:id", verify_token, is_authenticated,
                 attributes: [
                     "id", "centro_id", "nombres", "apellidos", "titulo_obtenido", "otros_titulos", "pdf",
                     [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "instructors".centro_id)`), "centro_nombre"],
+                    [sequelize.literal(`(SELECT COUNT(*) FROM centros.procesos p WHERE p.instructor_id = "instructors".id AND p.estatus = 1)::int`), "process_count"],
                 ],
             });
             if (!instructor) return res.status(404).json({ message: "Instructor no encontrado" });
@@ -711,9 +713,12 @@ router.post("/centros/:centroId/estudiantes", verify_token, is_supervisor,
             const centroId = Number(req.params.centroId);
             const b = req.body;
 
-            if (!b.identidad || !b.nombres || !b.apellidos || !b.departamento_id || !b.municipio_id || !b.sexo || !b.estado_civil || !b.vive || !b.numero_dep) {
+            if (!b.identidad || !b.nombres || !b.apellidos || !b.departamento_id || !b.municipio_id || !b.sexo || !b.vive || !b.numero_dep) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
+
+            const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: b.identidad.trim(), estatus: 1 } });
+            if (existingByIdentidad) return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
 
             const estudiante = await sgc_estudiantes.create({
                 centro_id: centroId, identidad: b.identidad.trim(), nombres: b.nombres.trim(), apellidos: b.apellidos.trim(),
@@ -747,7 +752,7 @@ router.post("/centros/:centroId/estudiantes", verify_token, is_supervisor,
             res.status(201).json({ ok: true, id: estudiante.id });
         } catch (e) {
             if (e.name === "SequelizeUniqueConstraintError") {
-                return res.status(400).json({ message: "Ya existe un estudiante con esta identidad en este centro" });
+                return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
             }
             next(e);
         }
@@ -760,12 +765,15 @@ router.put("/centros/:centroId/estudiantes", verify_token, is_supervisor,
             const centroId = Number(req.params.centroId);
             const b = req.body;
 
-            if (!b.id || !b.identidad || !b.nombres || !b.apellidos || !b.departamento_id || !b.municipio_id || !b.sexo || !b.estado_civil || !b.vive || !b.numero_dep) {
+            if (!b.id || !b.identidad || !b.nombres || !b.apellidos || !b.departamento_id || !b.municipio_id || !b.sexo || !b.vive || !b.numero_dep) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
             const estudiante = await sgc_estudiantes.findOne({ where: { id: b.id, centro_id: centroId } });
             if (!estudiante) return res.status(404).json({ message: "Estudiante no encontrado" });
+
+            const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: b.identidad.trim(), estatus: 1, id: { [Op.ne]: b.id } } });
+            if (existingByIdentidad) return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
 
             await sgc_estudiantes.update({
                 identidad: b.identidad.trim(), nombres: b.nombres.trim(), apellidos: b.apellidos.trim(),
@@ -798,7 +806,7 @@ router.put("/centros/:centroId/estudiantes", verify_token, is_supervisor,
             res.status(200).json({ ok: true });
         } catch (e) {
             if (e.name === "SequelizeUniqueConstraintError") {
-                return res.status(400).json({ message: "Ya existe un estudiante con esta identidad en este centro" });
+                return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
             }
             next(e);
         }
@@ -1038,12 +1046,15 @@ router.post("/students", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
             const b = req.body;
-            if (!b.centro_id || !b.identidad || !b.nombres || !b.apellidos || !b.departamento_id || !b.municipio_id || !b.sexo || !b.estado_civil || !b.vive || !b.numero_dep) {
+            if (!b.centro_id || !b.identidad || !b.nombres || !b.apellidos || !b.departamento_id || !b.municipio_id || !b.sexo || !b.vive || !b.numero_dep) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
             const centro = await sgc_centros.findOne({ where: { id: b.centro_id } });
             if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+
+            const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: b.identidad.trim(), estatus: 1 } });
+            if (existingByIdentidad) return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
 
             const student = await sgc_estudiantes.create({
                 centro_id: b.centro_id, estatus: 1, ...buildStudentBody(b),
@@ -1053,7 +1064,7 @@ router.post("/students", verify_token, is_supervisor,
             res.status(201).json({ ok: true, id: student.id });
         } catch (e) {
             if (e.name === "SequelizeUniqueConstraintError") {
-                return res.status(400).json({ message: "Ya existe un estudiante con esta identidad en este centro" });
+                return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
             }
             next(e);
         }
@@ -1064,12 +1075,15 @@ router.put("/students", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
             const b = req.body;
-            if (!b.id || !b.identidad || !b.nombres || !b.apellidos || !b.departamento_id || !b.municipio_id || !b.sexo || !b.estado_civil || !b.vive || !b.numero_dep) {
+            if (!b.id || !b.identidad || !b.nombres || !b.apellidos || !b.departamento_id || !b.municipio_id || !b.sexo || !b.vive || !b.numero_dep) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
             const student = await sgc_estudiantes.findOne({ where: { id: b.id, estatus: 1 } });
             if (!student) return res.status(404).json({ message: "Estudiante no encontrado" });
+
+            const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: b.identidad.trim(), estatus: 1, id: { [Op.ne]: b.id } } });
+            if (existingByIdentidad) return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
 
             await sgc_estudiantes.update(buildStudentBody(b), { where: { id: b.id } });
 
@@ -1077,7 +1091,7 @@ router.put("/students", verify_token, is_supervisor,
             res.status(200).json({ ok: true });
         } catch (e) {
             if (e.name === "SequelizeUniqueConstraintError") {
-                return res.status(400).json({ message: "Ya existe un estudiante con esta identidad en este centro" });
+                return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
             }
             next(e);
         }
@@ -1609,12 +1623,14 @@ router.get("/tipo-jornadas", verify_token, is_authenticated,
 router.get("/processes", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
-            const { limit, offset, sort, desc, search, centro_id } = req.query;
+            const { limit, offset, sort, desc, search, centro_id, curso_id, instructor_id } = req.query;
             if (!limit || limit > 100) return res.status(400).json({ message: "Faltan campos requeridos" });
 
             const where = {
                 estatus: 1,
                 ...(centro_id ? { centro_id: Number(centro_id) } : {}),
+                ...(curso_id ? { curso_id: Number(curso_id) } : {}),
+                ...(instructor_id ? { instructor_id: Number(instructor_id) } : {}),
                 ...(search ? {
                     [Op.or]: [
                         { nombre: { [Op.iLike]: `%${search}%` } },
@@ -1660,6 +1676,9 @@ router.get("/processes/:id", verify_token, is_authenticated,
                     [sequelize.literal(`(SELECT CONCAT(i.nombres, ' ', i.apellidos) FROM centros.instructors i WHERE i.id = "procesos".instructor_id)`), "instructor_nombre"],
                     [sequelize.literal(`(SELECT m.nombre FROM centros.metodologias m WHERE m.id = "procesos".metodologia_id)`), "metodologia_nombre"],
                     [sequelize.literal(`(SELECT tj.nombre FROM centros.tipo_jornadas tj WHERE tj.id = "procesos".tipo_jornada_id)`), "tipo_jornada_nombre"],
+                    [sequelize.literal(`(SELECT COUNT(*) FROM centros.proceso_matriculas pm WHERE pm.proceso_id = "procesos".id AND pm.estatus = 1)::int`), "enrolled_count"],
+                    [sequelize.literal(`(SELECT COUNT(*) FROM centros.curso_modulos cm WHERE cm.curso_id = "procesos".curso_id)::int`), "module_count"],
+                    [sequelize.literal(`(SELECT COUNT(*) FROM caderh.projects_processes pp WHERE pp.process_id = "procesos".id)::int`), "project_count"],
                 ],
             });
             if (!process) return res.status(404).json({ message: "Proceso no encontrado" });
@@ -1833,6 +1852,100 @@ router.delete("/processes/:id/enrollments/:studentId", verify_token, is_supervis
             await sgc_proceso_matriculas.update({ estatus: 0 }, { where: { id: enrollment.id } });
             await user_logs.create({ user_id: req.user_id, log: `Desmatriculó estudiante ID: ${studentId} del proceso ID: ${processId}` });
             res.status(200).json({ ok: true });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// ─── Enrollment Excel export ─────────────────────────────────────────────────
+
+router.get("/processes/:id/enrollments/excel", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const processId = Number(req.params.id);
+
+            const process = await sgc_procesos.findOne({ where: { id: processId, estatus: 1 }, attributes: ["id", "codigo"] });
+            if (!process) return res.status(404).json({ message: "Proceso no encontrado" });
+
+            const enrollments = await sgc_proceso_matriculas.findAll({
+                where: { proceso_id: processId, estatus: 1 },
+                attributes: [
+                    "id",
+                    [sequelize.literal(`(SELECT CONCAT(e.nombres, ' ', e.apellidos) FROM centros.estudiantes e WHERE e.id = "proceso_matriculas".estudiante_id)`), "nombre_completo"],
+                    [sequelize.literal(`(SELECT e.identidad FROM centros.estudiantes e WHERE e.id = "proceso_matriculas".estudiante_id)`), "identidad"],
+                ],
+                order: [[sequelize.literal(`"nombre_completo"`), "ASC"]],
+            });
+
+            const rows = enrollments.map((e) => e.toJSON());
+            const wb = generateEnrollmentsExcel(rows);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            res.setHeader("Content-Disposition", `attachment; filename=matricula-${process.codigo || processId}.xlsx`);
+            await wb.write(res);
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.post("/processes/:id/enrollments/excel", verify_token, is_supervisor, excelUpload.single("file"),
+    async (req, res, next) => {
+        try {
+            const processId = Number(req.params.id);
+            if (!req.file) return res.status(400).json({ message: "Se requiere un archivo Excel" });
+
+            const process = await sgc_procesos.findOne({ where: { id: processId, estatus: 1 }, attributes: ["id", "centro_id"] });
+            if (!process) return res.status(404).json({ message: "Proceso no encontrado" });
+
+            const { parsed, errors } = parseEnrollmentsExcel(req.file.buffer);
+            if (parsed.length === 0 && errors.length > 0) {
+                return res.status(400).json({ message: "No se encontraron registros válidos", errors });
+            }
+
+            // Find students by identity within the same centro
+            const identidades = parsed.map((p) => p.identidad);
+            const students = await sgc_estudiantes.findAll({
+                where: { identidad: { [Op.in]: identidades }, centro_id: process.centro_id, estatus: 1 },
+                attributes: ["id", "identidad"],
+            });
+
+            const identityToId = new Map(students.map((s) => [s.identidad, s.id]));
+
+            // Check which are already enrolled
+            const existingEnrollments = await sgc_proceso_matriculas.findAll({
+                where: { proceso_id: processId, estatus: 1 },
+                attributes: ["estudiante_id"],
+            });
+            const enrolledIds = new Set(existingEnrollments.map((e) => e.estudiante_id));
+
+            let enrolled = 0;
+            const warnings = [];
+
+            for (const item of parsed) {
+                const studentId = identityToId.get(item.identidad);
+                if (!studentId) {
+                    warnings.push(`Identidad ${item.identidad}: estudiante no encontrado en el centro`);
+                    continue;
+                }
+                if (enrolledIds.has(studentId)) continue; // already enrolled, skip silently
+
+                await sgc_proceso_matriculas.create({
+                    proceso_id: processId,
+                    estudiante_id: studentId,
+                    tipo_matricula: 2,
+                    estatus: 1,
+                });
+                enrolledIds.add(studentId);
+                enrolled++;
+            }
+
+            await user_logs.create({
+                user_id: req.user_id,
+                log: `Importó matrícula Excel en proceso ID: ${processId}. Matriculados: ${enrolled}`,
+            });
+
+            res.status(200).json({ ok: true, enrolled, warnings, errors, processed: parsed.length });
         } catch (e) {
             next(e);
         }
@@ -2064,10 +2177,18 @@ router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, ex
                 raw: true,
             });
             const existingIds = new Set(existingRows.map((r) => r.id));
-            const existingIdentidades = new Map(existingRows.map((r) => [r.identidad, r.id]));
             const excelIds = new Set(parsed.filter((r) => r.id).map((r) => r.id));
 
-            // Validate unique identidad within excel + existing
+            // Fetch global identidades for uniqueness check
+            const parsedIdentidades = parsed.map((r) => r.identidad).filter(Boolean);
+            const globalExisting = await sgc_estudiantes.findAll({
+                where: { identidad: { [Op.in]: parsedIdentidades }, estatus: 1 },
+                attributes: ["id", "identidad"],
+                raw: true,
+            });
+            const globalIdentidades = new Map(globalExisting.map((r) => [r.identidad, r.id]));
+
+            // Validate unique identidad within excel + existing (globally)
             const seenIdentidades = new Map();
             const validRows = [];
             for (const row of parsed) {
@@ -2080,10 +2201,10 @@ router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, ex
                 }
                 seenIdentidades.set(row.identidad, true);
 
-                // Check if identidad already belongs to a different student in this centro
-                const existingStudentId = existingIdentidades.get(row.identidad);
+                // Check if identidad already belongs to a different student (globally)
+                const existingStudentId = globalIdentidades.get(row.identidad);
                 if (existingStudentId && (!row.id || row.id !== existingStudentId)) {
-                    errors.push({ row: null, message: `Identidad "${row.identidad}" ya existe para estudiante ID ${existingStudentId} en este centro` });
+                    errors.push({ row: null, message: `Identidad "${row.identidad}" ya existe para otro estudiante (ID ${existingStudentId})` });
                     continue;
                 }
 

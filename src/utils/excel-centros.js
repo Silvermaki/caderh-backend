@@ -195,7 +195,7 @@ export function generateStudentsExcel(rows, catalogs, protectedIds) {
     const neMap = Object.fromEntries((catalogs.nivelEscolaridades ?? []).map((n) => [n.id, n.nombre]));
 
     const headers = [
-        "ID", "Protegido", "Identidad*", "Nombres*", "Apellidos*", "Sexo*", "Estado Civil*",
+        "ID", "Protegido", "Identidad*", "Nombres*", "Apellidos*", "Sexo*", "Estado Civil",
         "Fecha Nacimiento", "Tipo Sangre",
         "Departamento ID*", "Departamento", "Municipio ID*", "Municipio", "Direccion",
         "Email", "Telefono", "Celular", "Facebook", "Instagram", "Twitter",
@@ -226,7 +226,7 @@ export function generateStudentsExcel(rows, catalogs, protectedIds) {
         22, 16, 20, 16, 20,
     ];
     const refCols = new Set([10, 12, 22]); // Departamento name, Municipio name, Nivel Escolaridad name
-    const requiredCols = new Set([2, 3, 4, 5, 6, 9, 11, 23, 24]);
+    const requiredCols = new Set([2, 3, 4, 5, 9, 11, 23, 24]);
 
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(requiredCols.has(i) ? s.headerRequired : s.header));
     widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
@@ -511,7 +511,6 @@ export function parseStudentsExcel(buffer) {
         if (!nombres) { errors.push({ row: rowNum, message: "Nombres es requerido" }); return; }
         if (!apellidos) { errors.push({ row: rowNum, message: "Apellidos es requerido" }); return; }
         if (!sexo) { errors.push({ row: rowNum, message: "Sexo es requerido" }); return; }
-        if (!estado_civil) { errors.push({ row: rowNum, message: "Estado Civil es requerido" }); return; }
 
         const departamento_id = intOrNull(row["Departamento ID"]);
         const municipio_id = intOrNull(row["Municipio ID"]);
@@ -757,6 +756,54 @@ export function parseModulesExcel(buffer) {
         const tipo_evaluacion = rawEval ? (EVAL_TYPE_MAP[String(rawEval).toUpperCase().trim()] ?? 1) : 1;
 
         parsed.push({ id, codigo, nombre, horas_teoricas, horas_practicas, tipo_evaluacion, observaciones });
+    });
+
+    return { parsed, errors };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GENERATE: Matrícula de Proceso Educativo (solo export, sin import)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export function generateEnrollmentsExcel(rows) {
+    const wb = new xl.Workbook();
+    const s = createStyles(wb);
+    const ws = wb.addWorksheet("Matricula");
+
+    const headers = ["Nombre Completo", "Identidad"];
+    const widths = [40, 20];
+
+    headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(s.header));
+    widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
+    ws.row(1).freeze();
+
+    rows.forEach((r, idx) => {
+        const row = idx + 2;
+        const isAlt = idx % 2 !== 0;
+        const base = isAlt ? s.cellAlt : s.cell;
+        const vals = [r.nombre_completo || "", r.identidad || ""];
+        vals.forEach((val, col) => writeCell(ws, row, col + 1, val, base));
+    });
+
+    return wb;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PARSE: Matrícula de Proceso Educativo (import por identidad)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export function parseEnrollmentsExcel(buffer) {
+    const jsonRows = readFirstSheet(buffer);
+    const parsed = [];
+    const errors = [];
+
+    jsonRows.forEach((row, idx) => {
+        const rowNum = idx + 2;
+        const identidad = strOrNull(row["Identidad"]);
+
+        if (!identidad) { errors.push({ row: rowNum, message: "Identidad es requerida" }); return; }
+
+        parsed.push({ identidad: identidad.trim() });
     });
 
     return { parsed, errors };

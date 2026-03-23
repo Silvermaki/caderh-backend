@@ -540,7 +540,7 @@ export const sgc_estudiantes = sequelize.define('estudiantes', {
     municipio_id: { type: DataTypes.INTEGER, allowNull: false },
     direccion: { type: DataTypes.TEXT, allowNull: true },
     fecha_nacimiento: { type: DataTypes.TEXT, allowNull: true },
-    estado_civil: { type: DataTypes.TEXT, allowNull: false },
+    estado_civil: { type: DataTypes.TEXT, allowNull: true },
     sexo: { type: DataTypes.TEXT, allowNull: false },
     email: { type: DataTypes.TEXT, allowNull: true },
     facebook: { type: DataTypes.TEXT, allowNull: true },
