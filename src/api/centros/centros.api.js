@@ -1191,6 +1191,58 @@ router.delete("/students/:id/pdf", verify_token, is_supervisor,
     }
 );
 
+// ─── Student enrollments (cross-process) ────────────────────────────────────
+
+router.post("/students/batch-enrollment-check", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { student_ids, exclude_process_id } = req.body;
+            if (!Array.isArray(student_ids) || student_ids.length === 0) {
+                return res.status(400).json({ message: "student_ids requerido" });
+            }
+
+            const rows = await sequelize.query(`
+                SELECT pm.estudiante_id, COUNT(*)::int AS count
+                FROM centros.proceso_matriculas pm
+                JOIN centros.procesos p ON p.id = pm.proceso_id
+                WHERE pm.estudiante_id IN (:ids) AND pm.estatus = 1
+                AND p.estatus = 1 AND p.fecha_final >= CURRENT_DATE
+                ${exclude_process_id ? "AND pm.proceso_id != :excludeId" : ""}
+                GROUP BY pm.estudiante_id
+                HAVING COUNT(*) > 0
+            `, {
+                replacements: { ids: student_ids.map(Number), excludeId: exclude_process_id ? Number(exclude_process_id) : 0 },
+                type: sequelize.QueryTypes.SELECT,
+            });
+
+            res.json({ data: rows });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.get("/students/:studentId/enrollments", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const studentId = Number(req.params.studentId);
+            const rows = await sequelize.query(`
+                SELECT pm.id, pm.proceso_id, p.nombre AS proceso_nombre, p.codigo AS proceso_codigo,
+                       p.fecha_inicial, p.fecha_final, c.nombre AS centro_nombre
+                FROM centros.proceso_matriculas pm
+                JOIN centros.procesos p ON p.id = pm.proceso_id
+                JOIN centros.centros c ON c.id = p.centro_id
+                WHERE pm.estudiante_id = :studentId AND pm.estatus = 1
+                AND p.estatus = 1 AND p.fecha_final >= CURRENT_DATE
+                ORDER BY p.nombre ASC
+            `, { replacements: { studentId }, type: sequelize.QueryTypes.SELECT });
+            res.json({ data: rows });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
 // ─── Courses CRUD (global) ──────────────────────────────────────────────────
 
 router.get("/courses", verify_token, is_authenticated,
@@ -1795,6 +1847,7 @@ router.get("/processes/:id/enrollments", verify_token, is_authenticated,
                     "id", "proceso_id", "estudiante_id", "tipo_matricula",
                     [sequelize.literal(`(SELECT CONCAT(e.nombres, ' ', e.apellidos) FROM centros.estudiantes e WHERE e.id = "proceso_matriculas".estudiante_id)`), "estudiante_nombre"],
                     [sequelize.literal(`(SELECT e.identidad FROM centros.estudiantes e WHERE e.id = "proceso_matriculas".estudiante_id)`), "estudiante_identidad"],
+                    [sequelize.literal(`(SELECT COUNT(*) FROM centros.proceso_matriculas pm2 JOIN centros.procesos p2 ON p2.id = pm2.proceso_id WHERE pm2.estudiante_id = "proceso_matriculas".estudiante_id AND pm2.estatus = 1 AND pm2.proceso_id != "proceso_matriculas".proceso_id AND p2.estatus = 1 AND p2.fecha_final >= CURRENT_DATE)::int`), "other_process_count"],
                 ],
                 order: [[sequelize.literal(`(SELECT e.nombres FROM centros.estudiantes e WHERE e.id = "proceso_matriculas".estudiante_id)`), "ASC"]],
             });
@@ -1830,8 +1883,29 @@ router.post("/processes/:id/enrollments", verify_token, is_supervisor,
                 );
             }
 
+            // Check which newly enrolled students are also in other current processes
+            let warnings = [];
+            if (newIds.length > 0) {
+                const multiEnrolled = await sequelize.query(`
+                    SELECT DISTINCT pm.estudiante_id FROM centros.proceso_matriculas pm
+                    JOIN centros.procesos p ON p.id = pm.proceso_id
+                    WHERE pm.estudiante_id IN (:ids) AND pm.estatus = 1
+                    AND pm.proceso_id != :processId AND p.estatus = 1
+                    AND p.fecha_final >= CURRENT_DATE
+                `, { replacements: { ids: newIds, processId }, type: sequelize.QueryTypes.SELECT });
+
+                if (multiEnrolled.length > 0) {
+                    const multiIds = multiEnrolled.map(r => r.estudiante_id);
+                    const multiStudents = await sgc_estudiantes.findAll({
+                        where: { id: { [Op.in]: multiIds } },
+                        attributes: ["id", [sequelize.literal(`CONCAT(nombres, ' ', apellidos)`), "nombre_completo"]],
+                    });
+                    warnings = multiStudents.map(s => s.toJSON().nombre_completo);
+                }
+            }
+
             await user_logs.create({ user_id: req.user_id, log: `Matriculó ${newIds.length} estudiante(s) al proceso ID: ${processId}` });
-            res.status(201).json({ ok: true, enrolled: newIds.length });
+            res.status(201).json({ ok: true, enrolled: newIds.length, warnings });
         } catch (e) {
             next(e);
         }
