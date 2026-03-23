@@ -765,13 +765,20 @@ export function parseModulesExcel(buffer) {
 // GENERATE: Matrícula de Proceso Educativo (solo export, sin import)
 // ═══════════════════════════════════════════════════════════════════════════
 
-export function generateEnrollmentsExcel(rows) {
+export function generateEnrollmentsExcel(rows, studentsCatalog) {
     const wb = new xl.Workbook();
     const s = createStyles(wb);
-    const ws = wb.addWorksheet("Matricula");
 
-    const headers = ["Nombre Completo", "Identidad"];
-    const widths = [40, 20];
+    const warn = wb.createStyle({
+        fill: { type: "pattern", patternType: "solid", fgColor: "FFF2CC" },
+        font: { size: 10, color: "CC6600" },
+        border: { bottom: { style: "thin", color: "D9D9D9" }, top: { style: "thin", color: "D9D9D9" }, left: { style: "thin", color: "D9D9D9" }, right: { style: "thin", color: "D9D9D9" } },
+    });
+
+    // Main sheet: enrolled students
+    const ws = wb.addWorksheet("Matricula");
+    const headers = ["Identidad", "Nombre Completo"];
+    const widths = [20, 40];
 
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(s.header));
     widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
@@ -779,11 +786,35 @@ export function generateEnrollmentsExcel(rows) {
 
     rows.forEach((r, idx) => {
         const row = idx + 2;
+        const isWarning = (r.other_process_count ?? 0) > 0;
         const isAlt = idx % 2 !== 0;
-        const base = isAlt ? s.cellAlt : s.cell;
-        const vals = [r.nombre_completo || "", r.identidad || ""];
+        const base = isWarning ? warn : (isAlt ? s.cellAlt : s.cell);
+        const vals = [r.identidad || "", r.nombre_completo || ""];
         vals.forEach((val, col) => writeCell(ws, row, col + 1, val, base));
     });
+
+    // Catalog sheet: available students from the centro (not enrolled in this process)
+    if (studentsCatalog && studentsCatalog.length > 0) {
+        const wsCat = wb.addWorksheet("Estudiantes");
+        const catHeaders = ["Identidad", "Nombre Completo", "En Proceso Activo"];
+        const catWidths = [20, 40, 18];
+        catHeaders.forEach((h, i) => wsCat.cell(1, i + 1).string(h).style(s.catalogHeader));
+        catWidths.forEach((w, i) => wsCat.column(i + 1).setWidth(w));
+        wsCat.row(1).freeze();
+
+        studentsCatalog.forEach((st, idx) => {
+            const row = idx + 2;
+            const isActive = st.procesos_activos > 0;
+            const isAlt = idx % 2 !== 0;
+            const base = isActive ? warn : (isAlt ? s.cellAlt : s.cell);
+            const vals = [
+                st.identidad || "",
+                `${st.nombres || ""} ${st.apellidos || ""}`.trim(),
+                isActive ? "Sí" : "No",
+            ];
+            vals.forEach((val, col) => writeCell(wsCat, row, col + 1, val, base));
+        });
+    }
 
     return wb;
 }

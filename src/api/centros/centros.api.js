@@ -1939,7 +1939,7 @@ router.get("/processes/:id/enrollments/excel", verify_token, is_authenticated,
         try {
             const processId = Number(req.params.id);
 
-            const process = await sgc_procesos.findOne({ where: { id: processId, estatus: 1 }, attributes: ["id", "codigo"] });
+            const process = await sgc_procesos.findOne({ where: { id: processId, estatus: 1 }, attributes: ["id", "codigo", "centro_id"] });
             if (!process) return res.status(404).json({ message: "Proceso no encontrado" });
 
             const enrollments = await sgc_proceso_matriculas.findAll({
@@ -1948,15 +1948,35 @@ router.get("/processes/:id/enrollments/excel", verify_token, is_authenticated,
                     "id",
                     [sequelize.literal(`(SELECT CONCAT(e.nombres, ' ', e.apellidos) FROM centros.estudiantes e WHERE e.id = "proceso_matriculas".estudiante_id)`), "nombre_completo"],
                     [sequelize.literal(`(SELECT e.identidad FROM centros.estudiantes e WHERE e.id = "proceso_matriculas".estudiante_id)`), "identidad"],
+                    [sequelize.literal(`(SELECT COUNT(*) FROM centros.proceso_matriculas pm2 JOIN centros.procesos p2 ON p2.id = pm2.proceso_id WHERE pm2.estudiante_id = "proceso_matriculas".estudiante_id AND pm2.estatus = 1 AND pm2.proceso_id != "proceso_matriculas".proceso_id AND p2.estatus = 1 AND p2.fecha_final >= CURRENT_DATE)::int`), "other_process_count"],
                 ],
                 order: [[sequelize.literal(`"nombre_completo"`), "ASC"]],
             });
 
+            // Fetch students from the same centro NOT enrolled in this process (for catalog sheet)
+            const centroId = process.centro_id;
+            const allStudents = await sequelize.query(`
+                SELECT e.id, e.identidad, e.nombres, e.apellidos,
+                    (SELECT COUNT(*)::int FROM centros.proceso_matriculas pm
+                     JOIN centros.procesos p ON p.id = pm.proceso_id
+                     WHERE pm.estudiante_id = e.id
+                     AND pm.estatus = 1 AND p.estatus = 1
+                     AND p.fecha_final >= CURRENT_DATE
+                     AND pm.proceso_id != :processId) AS procesos_activos
+                FROM centros.estudiantes e
+                WHERE e.centro_id = :centroId AND e.estatus = 1
+                  AND e.id NOT IN (
+                      SELECT pm.estudiante_id FROM centros.proceso_matriculas pm
+                      WHERE pm.proceso_id = :processId AND pm.estatus = 1
+                  )
+                ORDER BY e.nombres ASC, e.apellidos ASC
+            `, { replacements: { centroId, processId }, type: sequelize.QueryTypes.SELECT });
+
             const rows = enrollments.map((e) => e.toJSON());
-            const wb = generateEnrollmentsExcel(rows);
+            const wb = generateEnrollmentsExcel(rows, allStudents);
             res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
             res.setHeader("Content-Disposition", `attachment; filename=matricula-${process.codigo || processId}.xlsx`);
-            await wb.write(res);
+            return wb.write(`matricula-${process.codigo || processId}.xlsx`, res);
         } catch (e) {
             next(e);
         }
@@ -1994,15 +2014,20 @@ router.post("/processes/:id/enrollments/excel", verify_token, is_supervisor, exc
             const enrolledIds = new Set(existingEnrollments.map((e) => e.estudiante_id));
 
             let enrolled = 0;
+            let removed = 0;
             const warnings = [];
 
+            // Resolve student IDs from the Excel
+            const excelStudentIds = new Set();
             for (const item of parsed) {
                 const studentId = identityToId.get(item.identidad);
                 if (!studentId) {
                     warnings.push(`Identidad ${item.identidad}: estudiante no encontrado en el centro`);
                     continue;
                 }
-                if (enrolledIds.has(studentId)) continue; // already enrolled, skip silently
+                excelStudentIds.add(studentId);
+
+                if (enrolledIds.has(studentId)) continue; // already enrolled, skip
 
                 await sgc_proceso_matriculas.create({
                     proceso_id: processId,
@@ -2010,16 +2035,26 @@ router.post("/processes/:id/enrollments/excel", verify_token, is_supervisor, exc
                     tipo_matricula: 2,
                     estatus: 1,
                 });
-                enrolledIds.add(studentId);
                 enrolled++;
+            }
+
+            // Remove students that are currently enrolled but NOT in the Excel
+            for (const existingId of enrolledIds) {
+                if (!excelStudentIds.has(existingId)) {
+                    await sgc_proceso_matriculas.update(
+                        { estatus: 0 },
+                        { where: { proceso_id: processId, estudiante_id: existingId, estatus: 1 } },
+                    );
+                    removed++;
+                }
             }
 
             await user_logs.create({
                 user_id: req.user_id,
-                log: `Importó matrícula Excel en proceso ID: ${processId}. Matriculados: ${enrolled}`,
+                log: `Importó matrícula Excel en proceso ID: ${processId}. Matriculados: ${enrolled}, Removidos: ${removed}`,
             });
 
-            res.status(200).json({ ok: true, enrolled, warnings, errors, processed: parsed.length });
+            res.status(200).json({ ok: true, enrolled, removed, warnings, errors, processed: parsed.length });
         } catch (e) {
             next(e);
         }
