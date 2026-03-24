@@ -1226,15 +1226,19 @@ router.get("/students/:studentId/enrollments", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const studentId = Number(req.params.studentId);
+            const all = req.query.all === "true";
             const rows = await sequelize.query(`
                 SELECT pm.id, pm.proceso_id, p.nombre AS proceso_nombre, p.codigo AS proceso_codigo,
-                       p.fecha_inicial, p.fecha_final, c.nombre AS centro_nombre
+                       p.fecha_inicial, p.fecha_final, c.nombre AS centro_nombre,
+                       cur.nombre AS curso_nombre,
+                       (SELECT COUNT(*)::int FROM centros.proceso_matriculas pm2 WHERE pm2.proceso_id = p.id AND pm2.estatus = 1) AS enrolled_count
                 FROM centros.proceso_matriculas pm
                 JOIN centros.procesos p ON p.id = pm.proceso_id
                 JOIN centros.centros c ON c.id = p.centro_id
+                LEFT JOIN centros.cursos cur ON cur.id = p.curso_id
                 WHERE pm.estudiante_id = :studentId AND pm.estatus = 1
-                AND p.estatus = 1 AND p.fecha_final >= CURRENT_DATE
-                ORDER BY p.nombre ASC
+                ${all ? "" : "AND p.estatus = 1 AND p.fecha_final >= CURRENT_DATE"}
+                ORDER BY p.fecha_inicial DESC
             `, { replacements: { studentId }, type: sequelize.QueryTypes.SELECT });
             res.json({ data: rows });
         } catch (e) {
