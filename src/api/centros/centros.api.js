@@ -301,6 +301,206 @@ router.put("/centros/:id", verify_token, is_supervisor,
     }
 );
 
+// ─── Centro Wizard (create centro + courses + instructors + students) ────────
+
+router.post("/centros/wizard", verify_token, is_supervisor,
+    async (req, res, next) => {
+        const t = await sequelize.transaction();
+        try {
+            const b = req.body;
+
+            // 1. Validate centro required fields
+            if (!b.nombre?.trim() || !b.siglas?.trim() || !b.codigo?.trim() || !b.departamento_id || !b.municipio_id) {
+                await t.rollback();
+                return res.status(400).json({ message: "Faltan campos requeridos del centro (nombre, siglas, codigo, departamento, municipio)" });
+            }
+
+            // 2. Create centro
+            const centro = await sgc_centros.create({
+                nombre: b.nombre.trim(),
+                siglas: b.siglas.trim(),
+                codigo: b.codigo.trim(),
+                descripcion: b.descripcion?.trim() || null,
+                departamento_id: Number(b.departamento_id),
+                municipio_id: Number(b.municipio_id),
+                direccion: b.direccion?.trim() || null,
+                telefono: b.telefono?.trim() || null,
+                email: b.email?.trim() || null,
+                pagina_web: b.pagina_web?.trim() || null,
+                facebook: b.facebook?.trim() || null,
+                twitter: b.twitter?.trim() || null,
+                nombre_director: b.nombre_director?.trim() || null,
+                telefono_director: b.telefono_director?.trim() || null,
+                email_director: b.email_director?.trim() || null,
+                nombre_contacto: b.nombre_contacto?.trim() || null,
+                telefono_contacto: b.telefono_contacto?.trim() || null,
+                email_contacto: b.email_contacto?.trim() || null,
+                puesto_contacto: b.puesto_contacto?.trim() || null,
+                estatus: 1,
+            }, { transaction: t });
+
+            const centroId = centro.id;
+            let coursesCreated = 0, instructorsCreated = 0, studentsCreated = 0;
+            const errors = [];
+
+            // 3. Create courses with modules
+            const courses = Array.isArray(b.courses) ? b.courses : [];
+            for (const c of courses) {
+                try {
+                    if (!c.nombre?.trim() || !c.codigo_programa?.trim() || !c.objetivo?.trim()) {
+                        errors.push(`Curso "${c.nombre || "sin nombre"}": faltan campos requeridos`);
+                        continue;
+                    }
+                    const course = await sgc_cursos.create({
+                        centro_id: centroId,
+                        codigo: c.codigo ? Number(c.codigo) : null,
+                        nombre: c.nombre.trim(),
+                        codigo_programa: c.codigo_programa.trim(),
+                        total_horas: "0",
+                        taller: c.taller ?? 1,
+                        objetivo: c.objetivo.trim(),
+                        estatus: 1,
+                    }, { transaction: t });
+
+                    const modules = Array.isArray(c.modules) ? c.modules : [];
+                    for (const m of modules) {
+                        try {
+                            if (!m.codigo || !m.nombre || !m.horas_teoricas || !m.horas_practicas) continue;
+                            await sgc_curso_modulos.create({
+                                curso_id: course.id,
+                                codigo: m.codigo,
+                                nombre: m.nombre,
+                                horas_teoricas: m.horas_teoricas,
+                                horas_practicas: m.horas_practicas,
+                                tipo_evaluacion: m.tipo_evaluacion ?? 1,
+                                observaciones: m.observaciones || null,
+                            }, { transaction: t });
+                        } catch (err) {
+                            errors.push(`Módulo "${m.nombre}" del curso "${c.nombre}": ${err.message}`);
+                        }
+                    }
+
+                    // Recalculate total_horas
+                    const mods = await sgc_curso_modulos.findAll({ where: { curso_id: course.id }, transaction: t, raw: true });
+                    const total = mods.reduce((sum, m) => sum + (parseFloat(m.horas_teoricas) || 0) + (parseFloat(m.horas_practicas) || 0), 0);
+                    await sgc_cursos.update({ total_horas: String(total) }, { where: { id: course.id }, transaction: t });
+
+                    coursesCreated++;
+                } catch (err) {
+                    errors.push(`Curso "${c.nombre}": ${err.message}`);
+                }
+            }
+
+            // 4. Create instructors
+            const instructors = Array.isArray(b.instructors) ? b.instructors : [];
+            for (const i of instructors) {
+                try {
+                    if (!i.nombres?.trim() || !i.apellidos?.trim()) {
+                        errors.push(`Instructor "${i.nombres || "sin nombre"}": faltan campos requeridos`);
+                        continue;
+                    }
+                    await sgc_instructors.create({
+                        centro_id: centroId,
+                        nombres: i.nombres.trim(),
+                        apellidos: i.apellidos.trim(),
+                        titulo_obtenido: i.titulo_obtenido?.trim() || null,
+                        otros_titulos: i.otros_titulos?.trim() || null,
+                        estatus: 1,
+                    }, { transaction: t });
+                    instructorsCreated++;
+                } catch (err) {
+                    errors.push(`Instructor "${i.nombres}": ${err.message}`);
+                }
+            }
+
+            // 5. Create students
+            const students = Array.isArray(b.students) ? b.students : [];
+            // Check duplicate identidades within batch
+            const batchIdentidades = students.map(s => s.identidad?.trim()).filter(Boolean);
+            const duplicatesInBatch = batchIdentidades.filter((id, idx) => batchIdentidades.indexOf(id) !== idx);
+
+            // Check existing identidades in DB
+            let existingIdentidades = new Set();
+            if (batchIdentidades.length > 0) {
+                const existing = await sgc_estudiantes.findAll({
+                    where: { identidad: { [Op.in]: batchIdentidades }, estatus: 1 },
+                    attributes: ["identidad"],
+                    raw: true,
+                    transaction: t,
+                });
+                existingIdentidades = new Set(existing.map(e => e.identidad));
+            }
+
+            for (const s of students) {
+                try {
+                    const identidad = s.identidad?.trim();
+                    if (!identidad || !s.nombres?.trim() || !s.apellidos?.trim() || !s.sexo || !s.departamento_id || !s.municipio_id || !s.vive || s.numero_dep == null) {
+                        errors.push(`Estudiante "${identidad || "sin identidad"}": faltan campos requeridos`);
+                        continue;
+                    }
+                    if (duplicatesInBatch.includes(identidad)) {
+                        errors.push(`Estudiante "${identidad}": identidad duplicada en el archivo`);
+                        continue;
+                    }
+                    if (existingIdentidades.has(identidad)) {
+                        errors.push(`Estudiante "${identidad}": ya existe en el sistema`);
+                        continue;
+                    }
+                    await sgc_estudiantes.create({
+                        centro_id: centroId,
+                        estatus: 1,
+                        ...buildStudentBody(s),
+                    }, { transaction: t });
+                    existingIdentidades.add(identidad);
+                    studentsCreated++;
+                } catch (err) {
+                    errors.push(`Estudiante "${s.identidad}": ${err.message}`);
+                }
+            }
+
+            // 6. Commit
+            await t.commit();
+
+            await user_logs.create({ user_id: req.user_id, log: `Creó centro ID: ${centroId} con ${coursesCreated} curso(s), ${instructorsCreated} instructor(es), ${studentsCreated} estudiante(s) por wizard` });
+            res.status(201).json({ ok: true, centroId, coursesCreated, instructorsCreated, studentsCreated, errors: errors.length > 0 ? errors : undefined });
+        } catch (e) {
+            await t.rollback();
+            next(e);
+        }
+    }
+);
+
+// ─── Excel Templates (for wizard, no IDs) ───────────────────────────────────
+
+router.get("/centros/excel/template/:entity", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { entity } = req.params;
+            const catalogs = await loadCatalogosBase();
+            let wb, filename;
+
+            if (entity === "courses") {
+                wb = generateCoursesExcel([], catalogs, []);
+                filename = "plantilla-cursos.xlsx";
+            } else if (entity === "instructors") {
+                wb = generateInstructorsExcel([], catalogs, []);
+                filename = "plantilla-instructores.xlsx";
+            } else if (entity === "students") {
+                wb = generateStudentsExcel([], catalogs, []);
+                filename = "plantilla-estudiantes.xlsx";
+            } else {
+                return res.status(400).json({ message: "Entidad no válida. Use: courses, instructors, students" });
+            }
+
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            res.setHeader("Content-Disposition", `attachment; filename=${filename}`);
+            return wb.write(filename, res);
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
 // ─── Centro Summary (mini-dashboard) ─────────────────────────────────────────
 
 router.get("/centros/:id/summary", verify_token, is_authenticated,
