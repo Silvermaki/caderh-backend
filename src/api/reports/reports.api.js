@@ -5,6 +5,7 @@ import { handler as r6 } from './reports/r6-ingreso-proyecto.js';
 import { handler as r7 } from './reports/r7-ingreso-consolidado.js';
 import { handler as r8 } from './reports/r8-overhead.js';
 import { handler as r12 } from './reports/r12-presupuesto.js';
+import { handler as r2 } from './reports/r2-listado-jovenes.js';
 
 // Report handlers will be imported + registered as T11-T21 add them.
 
@@ -37,5 +38,6 @@ router.get('/r6-ingreso-proyecto', r6);
 router.get('/r7-ingreso-consolidado', r7);
 router.get('/r8-overhead', r8);
 router.get('/r12-presupuesto-vs-ejecutado', r12);
+router.get('/r2-listado-jovenes', r2);
 
 // Per-report routes added in subsequent tasks.
