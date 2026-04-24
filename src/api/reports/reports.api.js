@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { verify_token, is_authenticated } from '../../utils/token.js';
 import { handler as r6 } from './reports/r6-ingreso-proyecto.js';
 import { handler as r7 } from './reports/r7-ingreso-consolidado.js';
+import { handler as r8 } from './reports/r8-overhead.js';
 
 // Report handlers will be imported + registered as T11-T21 add them.
 
@@ -31,5 +32,6 @@ router.use(verify_token, is_authenticated);
 
 router.get('/r6-ingreso-proyecto', r6);
 router.get('/r7-ingreso-consolidado', r7);
+router.get('/r8-overhead', r8);
 
 // Per-report routes added in subsequent tasks.
