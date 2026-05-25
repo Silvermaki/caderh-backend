@@ -1,6 +1,6 @@
 import { reportHandler } from '../shared.js';
 
-// R14: Plantilla AC-R-022 — requiere XLSX pixel-perfect generation.
+// R11: Plantilla AC-R-022 (Informe trimestral) — requiere XLSX pixel-perfect generation.
 // Implementación completa pendiente: template .xlsx como asset + ExcelJS.
 
 export const handler = reportHandler(async (_req) => ({

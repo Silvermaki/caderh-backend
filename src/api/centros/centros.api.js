@@ -1452,7 +1452,17 @@ router.get("/students/:studentId/enrollments", verify_token, is_authenticated,
 router.get("/courses", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
-            const { limit, offset, sort, desc, search, centro_id } = req.query;
+            const { limit, offset, sort, desc, search, centro_id, all } = req.query;
+
+            if (all === "true") {
+                const rows = await sgc_cursos.findAll({
+                    where: { estatus: 1, ...(centro_id ? { centro_id: Number(centro_id) } : {}) },
+                    attributes: ["id", "nombre"],
+                    order: [["nombre", "ASC"]],
+                });
+                return res.status(200).json({ data: rows });
+            }
+
             if (!limit || limit > 100) return res.status(400).json({ message: "Faltan campos requeridos" });
 
             const where = {

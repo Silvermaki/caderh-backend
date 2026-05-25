@@ -5,6 +5,21 @@ import XLSX from "xlsx";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function formatDate(val) {
+    if (!val) return "";
+    if (val instanceof Date) return val.toISOString().slice(0, 10);
+    const s = String(val).trim();
+    if (!s) return "";
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
+}
+
+function parseDate(val) {
+    const out = formatDate(val);
+    return out || null;
+}
+
 const DONATION_TYPE_MAP = {
     EFECTIVO: "CASH",
     SUMINISTROS: "SUPPLY",
@@ -39,8 +54,8 @@ export function generateFinancingSourcesExcel(rows, allSources, options = {}) {
     const hStyle = headerStyle(wb);
 
     const headers = includeId
-        ? ["ID", "Fuente ID", "Fuente Nombre", "Monto", "Descripcion"]
-        : ["Fuente ID", "Fuente Nombre", "Monto", "Descripcion"];
+        ? ["ID", "Fuente ID", "Fuente Nombre", "Monto", "Descripcion", "Fecha Desembolso"]
+        : ["Fuente ID", "Fuente Nombre", "Monto", "Descripcion", "Fecha Desembolso"];
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(hStyle));
 
     // Column widths
@@ -50,11 +65,13 @@ export function generateFinancingSourcesExcel(rows, allSources, options = {}) {
         ws.column(3).setWidth(30);
         ws.column(4).setWidth(18);
         ws.column(5).setWidth(30);
+        ws.column(6).setWidth(18);
     } else {
         ws.column(1).setWidth(38);
         ws.column(2).setWidth(30);
         ws.column(3).setWidth(18);
         ws.column(4).setWidth(30);
+        ws.column(5).setWidth(18);
     }
 
     const sourceMap = Object.fromEntries((allSources ?? []).map((s) => [s.id, s.name]));
@@ -67,11 +84,13 @@ export function generateFinancingSourcesExcel(rows, allSources, options = {}) {
             ws.cell(row, 3).string(sourceMap[r.financing_source_id] ?? "");
             ws.cell(row, 4).number(Number(r.amount ?? 0) / 100);
             ws.cell(row, 5).string(r.description ?? "");
+            ws.cell(row, 6).string(formatDate(r.disbursement_date));
         } else {
             ws.cell(row, 1).string(r.financing_source_id ?? "");
             ws.cell(row, 2).string(sourceMap[r.financing_source_id] ?? "");
             ws.cell(row, 3).number(Number(r.amount ?? 0) / 100);
             ws.cell(row, 4).string(r.description ?? "");
+            ws.cell(row, 5).string(formatDate(r.disbursement_date));
         }
     });
 
@@ -100,32 +119,40 @@ export function generateDonationsExcel(rows, options = {}) {
     const hStyle = headerStyle(wb);
 
     const headers = includeId
-        ? ["ID", "Monto", "Descripcion", "Tipo"]
-        : ["Monto", "Descripcion", "Tipo"];
+        ? ["ID", "Donante", "Monto", "Tipo", "Descripcion", "Fecha Desembolso"]
+        : ["Donante", "Monto", "Tipo", "Descripcion", "Fecha Desembolso"];
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(hStyle));
 
     if (includeId) {
         ws.column(1).setWidth(38);
-        ws.column(2).setWidth(18);
-        ws.column(3).setWidth(30);
-        ws.column(4).setWidth(18);
-    } else {
-        ws.column(1).setWidth(18);
         ws.column(2).setWidth(30);
         ws.column(3).setWidth(18);
+        ws.column(4).setWidth(18);
+        ws.column(5).setWidth(30);
+        ws.column(6).setWidth(18);
+    } else {
+        ws.column(1).setWidth(30);
+        ws.column(2).setWidth(18);
+        ws.column(3).setWidth(18);
+        ws.column(4).setWidth(30);
+        ws.column(5).setWidth(18);
     }
 
     rows.forEach((r, idx) => {
         const row = idx + 2;
         if (includeId) {
             ws.cell(row, 1).string(r.id ?? "");
-            ws.cell(row, 2).number(Number(r.amount ?? 0) / 100);
-            ws.cell(row, 3).string(r.description ?? "");
+            ws.cell(row, 2).string(r.donor_name ?? "");
+            ws.cell(row, 3).number(Number(r.amount ?? 0) / 100);
             ws.cell(row, 4).string(DONATION_TYPE_DISPLAY[r.donation_type] ?? "EFECTIVO");
+            ws.cell(row, 5).string(r.description ?? "");
+            ws.cell(row, 6).string(formatDate(r.disbursement_date));
         } else {
-            ws.cell(row, 1).number(Number(r.amount ?? 0) / 100);
-            ws.cell(row, 2).string(r.description ?? "");
+            ws.cell(row, 1).string(r.donor_name ?? "");
+            ws.cell(row, 2).number(Number(r.amount ?? 0) / 100);
             ws.cell(row, 3).string(DONATION_TYPE_DISPLAY[r.donation_type] ?? "EFECTIVO");
+            ws.cell(row, 4).string(r.description ?? "");
+            ws.cell(row, 5).string(formatDate(r.disbursement_date));
         }
     });
 
@@ -139,6 +166,8 @@ export function generateDonationsExcel(rows, options = {}) {
     ws2.cell(2, 2).string("Donacion en efectivo");
     ws2.cell(3, 1).string("SUMINISTROS");
     ws2.cell(3, 2).string("Donacion en especie / suministros");
+    ws2.cell(4, 1).string("BENEFICIO");
+    ws2.cell(4, 2).string("Donacion en beneficio / horas / servicios");
 
     return wb;
 }
@@ -183,7 +212,7 @@ export function generateExpensesExcel(rows, options = {}) {
 // ─── PARSE: Financing Sources ───────────────────────────────────────────────
 
 export function parseFinancingSourcesExcel(buffer) {
-    const workbook = XLSX.read(buffer, { type: "buffer" });
+    const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const jsonRows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
 
@@ -196,6 +225,7 @@ export function parseFinancingSourcesExcel(buffer) {
         const financing_source_id = String(row["Fuente ID"] ?? "").trim();
         const monto = Number(row["Monto"]);
         const description = String(row["Descripcion"] ?? "").trim();
+        const disbursement_date = parseDate(row["Fecha Desembolso"]);
 
         if (!financing_source_id) {
             errors.push({ row: rowNum, message: "Fuente ID es requerido" });
@@ -219,6 +249,7 @@ export function parseFinancingSourcesExcel(buffer) {
             financing_source_id,
             amount: Math.round(monto * 100),
             description,
+            disbursement_date,
         });
     });
 
@@ -228,7 +259,7 @@ export function parseFinancingSourcesExcel(buffer) {
 // ─── PARSE: Donations ───────────────────────────────────────────────────────
 
 export function parseDonationsExcel(buffer) {
-    const workbook = XLSX.read(buffer, { type: "buffer" });
+    const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const jsonRows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
 
@@ -238,11 +269,17 @@ export function parseDonationsExcel(buffer) {
     jsonRows.forEach((row, idx) => {
         const rowNum = idx + 2;
         const id = String(row["ID"] ?? "").trim();
+        const donor_name = String(row["Donante"] ?? "").trim();
         const monto = Number(row["Monto"]);
         const description = String(row["Descripcion"] ?? "").trim();
         const tipoRaw = String(row["Tipo"] ?? "").trim().toUpperCase();
         const donation_type = DONATION_TYPE_MAP[tipoRaw];
+        const disbursement_date = parseDate(row["Fecha Desembolso"]);
 
+        if (!donor_name) {
+            errors.push({ row: rowNum, message: "Donante es requerido" });
+            return;
+        }
         if (isNaN(monto)) {
             errors.push({ row: rowNum, message: "Monto inválido" });
             return;
@@ -258,9 +295,11 @@ export function parseDonationsExcel(buffer) {
 
         parsed.push({
             id: id || null,
+            donor_name,
             amount: Math.round(monto * 100),
             description,
             donation_type,
+            disbursement_date,
         });
     });
 

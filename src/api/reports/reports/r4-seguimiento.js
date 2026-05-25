@@ -13,7 +13,7 @@ const SQL = `
     pro.name                                  AS proyecto,
     CASE
       WHEN eg.practica_profesional = 1 THEN 'Pasantía'
-      WHEN eg.autoempleo           = 1 THEN 'Emprendiendo'
+      WHEN e.autoempleo           = 1 THEN 'Emprendiendo'
       WHEN eg.trabaja_actualmente  = 1 THEN 'Trabajando'
       WHEN eg.estudiando           = 1 THEN 'Estudiando'
       ELSE 'No aplica'
@@ -30,7 +30,7 @@ const SQL = `
   WHERE ($1::uuid[] IS NULL OR pro.id = ANY($1::uuid[]))
     AND ($2::text IS NULL OR
          ($2 = 'Pasantía'     AND eg.practica_profesional = 1) OR
-         ($2 = 'Emprendiendo' AND eg.autoempleo           = 1) OR
+         ($2 = 'Emprendiendo' AND e.autoempleo           = 1) OR
          ($2 = 'Trabajando'   AND eg.trabaja_actualmente  = 1) OR
          ($2 = 'Estudiando'   AND eg.estudiando           = 1)
     )
@@ -42,7 +42,7 @@ const KPI_SQL = `
   SELECT
     COUNT(*) FILTER (WHERE eg.practica_profesional = 1)::int AS pasantia,
     COUNT(*) FILTER (WHERE eg.trabaja_actualmente  = 1)::int AS trabajando,
-    COUNT(*) FILTER (WHERE eg.autoempleo           = 1)::int AS emprendiendo,
+    COUNT(*) FILTER (WHERE e.autoempleo           = 1)::int AS emprendiendo,
     COUNT(*) FILTER (WHERE eg.estudiando           = 1)::int AS estudiando,
     COUNT(*)::int                                            AS total
   FROM centros.egresados eg

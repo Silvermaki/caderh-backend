@@ -207,6 +207,10 @@ export const project_financing_sources = sequelize.define('project_financing_sou
         type: DataTypes.TEXT,
         allowNull: false,
     },
+    disbursement_date: {
+        type: DataTypes.DATEONLY,
+        allowNull: true,
+    },
     created_dt: {
         type: DataTypes.DATE,
         allowNull: false,
@@ -239,9 +243,18 @@ export const project_donations = sequelize.define('project_donations', {
         allowNull: false,
         defaultValue: ''
     },
+    donor_name: {
+        type: DataTypes.TEXT,
+        allowNull: false,
+        defaultValue: ''
+    },
     donation_type: {
         type: DataTypes.TEXT,
         allowNull: false,
+    },
+    disbursement_date: {
+        type: DataTypes.DATEONLY,
+        allowNull: true,
     },
     created_dt: {
         type: DataTypes.DATE,

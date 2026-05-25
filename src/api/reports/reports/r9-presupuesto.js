@@ -1,8 +1,9 @@
 import { sequelize } from '../../../utils/sequelize.js';
 import { reportHandler, centsToLmps } from '../shared.js';
 
-// R12: Ejecutado por proyecto y rubro. Columnas "programado", "% ejecución" y "saldo"
-// son missingInDb (no existe tabla de presupuesto programado).
+// R9: Presupuesto ejecutado vs programado por proyecto y rubro.
+// Columnas "programado", "% ejecución" y "saldo" son missingInDb (no existe
+// tabla de presupuesto programado aún).
 
 const SQL = `
   WITH ejecutado AS (
