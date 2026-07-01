@@ -223,12 +223,36 @@ router.get("/centros", verify_token, is_authenticated,
                     [sequelize.literal(`(SELECT m.nombre FROM centros.municipios m WHERE m.id = "centros".municipio_id)`), "municipio_nombre"],
                 ],
                 where,
-                order: sort ? [[sort, desc === "desc" ? "DESC" : "ASC"]] : [["nombre", "ASC"]],
+                order: sort ? [[sort, desc === "desc" ? "DESC" : "ASC"]] : [["codigo", "ASC"]],
                 limit: Number(limit),
                 offset: Number(offset ?? 0),
             });
 
             res.status(200).json({ data: result.rows, count: result.count });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Suggest next centro code (correlativo CFP-###). Only considers codes that
+// match the CFP-<number> shape; other prefixes (SPS01, etc.) are ignored so
+// they don't skew the counter. The frontend precarga this as an editable value.
+// NOTE: must be registered BEFORE "/centros/:id" to avoid the param route
+// capturing "next-code" as an id.
+router.get("/centros/next-code", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const prefix = "CFP";
+            const [rows] = await sequelize.query(
+                `SELECT COALESCE(MAX(substring(codigo from '\\d+$')::int), 0) AS max_num
+                 FROM centros.centros
+                 WHERE codigo ~ '^${prefix}-?\\d+$'`
+            );
+            const maxNum = Number(rows?.[0]?.max_num ?? 0);
+            const next = maxNum + 1;
+            const code = `${prefix}-${String(next).padStart(3, "0")}`;
+            res.status(200).json({ data: { code, next_number: next } });
         } catch (e) {
             next(e);
         }

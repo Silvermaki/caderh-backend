@@ -54,8 +54,8 @@ export function generateFinancingSourcesExcel(rows, allSources, options = {}) {
     const hStyle = headerStyle(wb);
 
     const headers = includeId
-        ? ["ID", "Fuente ID", "Fuente Nombre", "Monto", "Descripcion", "Fecha Desembolso"]
-        : ["Fuente ID", "Fuente Nombre", "Monto", "Descripcion", "Fecha Desembolso"];
+        ? ["ID", "Fuente ID", "Fuente Nombre", "Monto", "Descripcion", "Fecha de Ingreso"]
+        : ["Fuente ID", "Fuente Nombre", "Monto", "Descripcion", "Fecha de Ingreso"];
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(hStyle));
 
     // Column widths
@@ -119,8 +119,8 @@ export function generateDonationsExcel(rows, options = {}) {
     const hStyle = headerStyle(wb);
 
     const headers = includeId
-        ? ["ID", "Donante", "Monto", "Tipo", "Descripcion", "Fecha Desembolso"]
-        : ["Donante", "Monto", "Tipo", "Descripcion", "Fecha Desembolso"];
+        ? ["ID", "Donante", "Monto", "Tipo", "Descripcion", "Fecha de Ingreso"]
+        : ["Donante", "Monto", "Tipo", "Descripcion", "Fecha de Ingreso"];
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(hStyle));
 
     if (includeId) {
@@ -225,7 +225,7 @@ export function parseFinancingSourcesExcel(buffer) {
         const financing_source_id = String(row["Fuente ID"] ?? "").trim();
         const monto = Number(row["Monto"]);
         const description = String(row["Descripcion"] ?? "").trim();
-        const disbursement_date = parseDate(row["Fecha Desembolso"]);
+        const disbursement_date = parseDate(row["Fecha de Ingreso"] ?? row["Fecha Desembolso"]);
 
         if (!financing_source_id) {
             errors.push({ row: rowNum, message: "Fuente ID es requerido" });
@@ -274,7 +274,7 @@ export function parseDonationsExcel(buffer) {
         const description = String(row["Descripcion"] ?? "").trim();
         const tipoRaw = String(row["Tipo"] ?? "").trim().toUpperCase();
         const donation_type = DONATION_TYPE_MAP[tipoRaw];
-        const disbursement_date = parseDate(row["Fecha Desembolso"]);
+        const disbursement_date = parseDate(row["Fecha de Ingreso"] ?? row["Fecha Desembolso"]);
 
         if (!donor_name) {
             errors.push({ row: rowNum, message: "Donante es requerido" });

@@ -125,19 +125,12 @@ export function generateInstructorsExcel(rows, catalogs, protectedIds) {
     const s = createStyles(wb);
     const ws = wb.addWorksheet("Instructores");
 
-    const deptMap = Object.fromEntries((catalogs.departamentos ?? []).map((d) => [d.id, d.nombre]));
-    const munMap = Object.fromEntries((catalogs.municipios ?? []).map((m) => [m.id, m.nombre]));
-    const neMap = Object.fromEntries((catalogs.nivelEscolaridades ?? []).map((n) => [n.id, n.nombre]));
-
     const headers = [
-        "ID", "Protegido", "Identidad", "Nombres*", "Apellidos*", "Sexo", "Estado Civil",
-        "Fecha Nacimiento", "Departamento ID", "Departamento", "Municipio ID", "Municipio",
-        "Direccion", "Email", "Telefono", "Celular",
-        "Nivel Escolaridad ID", "Nivel Escolaridad", "Titulo Obtenido", "Otros Titulos",
+        "ID", "Protegido", "Nombres*", "Apellidos*", "Titulo Obtenido", "Otros Titulos",
     ];
-    const widths = [10, 12, 18, 22, 22, 10, 16, 16, 16, 22, 14, 22, 30, 25, 16, 16, 18, 22, 25, 25];
-    const refCols = new Set([9, 11, 17]); // 0-indexed cols that are reference (Departamento, Municipio, Nivel Escolaridad names)
-    const requiredCols = new Set([3, 4]);
+    const widths = [10, 12, 22, 22, 25, 25];
+    const refCols = new Set(); // no reference (readonly name) columns
+    const requiredCols = new Set([2, 3]);
 
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(requiredCols.has(i) ? s.headerRequired : s.header));
     widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
@@ -151,11 +144,8 @@ export function generateInstructorsExcel(rows, catalogs, protectedIds) {
         const isProt = protSet.has(r.id);
 
         const vals = [
-            r.id, isProt ? "SI" : "", r.identidad, r.nombres, r.apellidos,
-            r.sexo, r.estado_civil, r.fecha_nacimiento || "",
-            r.departamento_id, deptMap[r.departamento_id] ?? "", r.municipio_id, munMap[r.municipio_id] ?? "",
-            r.direccion || "", r.email || "", r.telefono || "", r.celular || "",
-            r.nivel_escolaridad_id ?? "", neMap[r.nivel_escolaridad_id] ?? "",
+            r.id, isProt ? "SI" : "",
+            r.nombres, r.apellidos,
             r.titulo_obtenido || "", r.otros_titulos || "",
         ];
 
@@ -169,13 +159,6 @@ export function generateInstructorsExcel(rows, catalogs, protectedIds) {
             }
         });
     });
-
-    // Catalog sheets
-    writeCatalogSheet(wb, s, "Departamentos", ["ID", "Nombre"], (catalogs.departamentos ?? []).map((d) => [d.id, d.nombre]), [10, 30]);
-    writeCatalogSheet(wb, s, "Municipios", ["ID", "Nombre", "Departamento ID"], (catalogs.municipios ?? []).map((m) => [m.id, m.nombre, m.departamento_id]), [10, 30, 16]);
-    writeCatalogSheet(wb, s, "Niveles Escolaridad", ["ID", "Nombre"], (catalogs.nivelEscolaridades ?? []).map((n) => [n.id, n.nombre]), [10, 30]);
-    writeCatalogSheet(wb, s, "Catalogo Sexo", ["Valor", "Descripcion"], SEXO_OPTIONS.map((o) => [o.value, o.label]), [10, 20]);
-    writeCatalogSheet(wb, s, "Catalogo Estado Civil", ["Valor"], ESTADO_CIVIL_OPTIONS.map((o) => [o.value]), [20]);
 
     return wb;
 }
@@ -292,16 +275,12 @@ export function generateCoursesExcel(rows, catalogs, protectedIds) {
     const s = createStyles(wb);
     const ws = wb.addWorksheet("Cursos");
 
-    const deptMap = Object.fromEntries((catalogs.departamentos ?? []).map((d) => [d.id, d.nombre]));
-    const munMap = Object.fromEntries((catalogs.municipios ?? []).map((m) => [m.id, m.nombre]));
-
     const headers = [
         "ID", "Protegido", "Codigo", "Nombre*", "Codigo Programa*", "Taller",
         "Total Horas", "Objetivo*",
-        "Departamento ID", "Departamento", "Municipio ID", "Municipio", "Comunidad",
     ];
-    const widths = [10, 12, 12, 30, 18, 10, 14, 40, 16, 22, 14, 22, 22];
-    const refCols = new Set([6, 9, 11]); // Total Horas (readonly), Departamento name, Municipio name
+    const widths = [10, 12, 12, 30, 18, 10, 14, 40];
+    const refCols = new Set([6]); // Total Horas (readonly)
     const requiredCols = new Set([3, 4, 7]);
 
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(requiredCols.has(i) ? s.headerRequired : s.header));
@@ -318,9 +297,6 @@ export function generateCoursesExcel(rows, catalogs, protectedIds) {
         const vals = [
             r.id, isProt ? "SI" : "", r.codigo, r.nombre, r.codigo_programa,
             r.taller ?? 1, r.total_horas || "", r.objetivo || "",
-            r.departamento_id ?? "", deptMap[r.departamento_id] ?? "",
-            r.municipio_id ?? "", munMap[r.municipio_id] ?? "",
-            r.comunidad || "",
         ];
 
         vals.forEach((val, col) => {
@@ -334,8 +310,6 @@ export function generateCoursesExcel(rows, catalogs, protectedIds) {
         });
     });
 
-    writeCatalogSheet(wb, s, "Departamentos", ["ID", "Nombre"], (catalogs.departamentos ?? []).map((d) => [d.id, d.nombre]), [10, 30]);
-    writeCatalogSheet(wb, s, "Municipios", ["ID", "Nombre", "Departamento ID"], (catalogs.municipios ?? []).map((m) => [m.id, m.nombre, m.departamento_id]), [10, 30, 16]);
     writeCatalogSheet(wb, s, "Catalogo Taller", ["Valor", "Descripcion"], [[0, "No"], [1, "Si"]], [10, 16]);
 
     return wb;
@@ -458,32 +432,18 @@ export function parseInstructorsExcel(buffer) {
     jsonRows.forEach((row, idx) => {
         const rowNum = idx + 2;
         const id = intOrNull(row["ID"]);
-        const identidad = strOrNull(row["Identidad"]);
         const nombres = strOrNull(row["Nombres"]);
         const apellidos = strOrNull(row["Apellidos"]);
-        const sexo = strOrNull(row["Sexo"]);
-        const estado_civil = strOrNull(row["Estado Civil"]);
-        const fecha_nacimiento = strOrNull(row["Fecha Nacimiento"]);
-        const departamento_id = intOrNull(row["Departamento ID"]);
-        const municipio_id = intOrNull(row["Municipio ID"]);
-        const direccion = strOrNull(row["Direccion"]);
-        const email = strOrNull(row["Email"]);
-        const telefono = strOrNull(row["Telefono"]);
-        const celular = strOrNull(row["Celular"]);
-        const nivel_escolaridad_id = intOrNull(row["Nivel Escolaridad ID"]);
         const titulo_obtenido = strOrNull(row["Titulo Obtenido"]);
         const otros_titulos = strOrNull(row["Otros Titulos"]);
 
         if (!nombres) { errors.push({ row: rowNum, message: "Nombres es requerido" }); return; }
         if (!apellidos) { errors.push({ row: rowNum, message: "Apellidos es requerido" }); return; }
 
-        parsed.push({
-            id, identidad: identidad || null, nombres, apellidos,
-            sexo: sexo || null, estado_civil: estado_civil || null,
-            fecha_nacimiento, departamento_id: departamento_id || null, municipio_id: municipio_id || null,
-            direccion, email, telefono, celular,
-            nivel_escolaridad_id: nivel_escolaridad_id || null, titulo_obtenido, otros_titulos,
-        });
+        // La plantilla de instructores es básica (nombres/apellidos/títulos);
+        // no se parsean los demás campos para que una importación no borre
+        // datos ya registrados en instructores existentes.
+        parsed.push({ id, nombres, apellidos, titulo_obtenido, otros_titulos });
     });
 
     return { parsed, errors };
@@ -589,14 +549,14 @@ export function parseCoursesExcel(buffer) {
         if (!codigo_programa) { errors.push({ row: rowNum, message: "Codigo Programa es requerido" }); return; }
         if (!objetivo) { errors.push({ row: rowNum, message: "Objetivo es requerido" }); return; }
 
+        // No se parsean departamento/municipio/comunidad: la plantilla de cursos
+        // de un CFP ya no incluye esas columnas, y omitirlas aquí evita que una
+        // importación borre los valores existentes en cursos ya registrados.
         parsed.push({
             id,
             codigo: (codigo !== "" && codigo !== null && codigo !== undefined) ? (Number.isInteger(Number(codigo)) ? Number(codigo) : codigo) : null,
             nombre, codigo_programa,
             taller: taller ?? 1, objetivo,
-            departamento_id: intOrNull(row["Departamento ID"]),
-            municipio_id: intOrNull(row["Municipio ID"]),
-            comunidad: strOrNull(row["Comunidad"]),
         });
     });
 

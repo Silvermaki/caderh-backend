@@ -1,26 +1,35 @@
 import { sequelize } from '../../../utils/sequelize.js';
 import { reportHandler, centsToLmps } from '../shared.js';
 
+// Correcciones:
+//   1. Se excluyen proyectos eliminados (soft delete): antes las donaciones y
+//      fuentes de proyectos DELETED inflaban los totales.
+//   2. El trimestre se deriva de la fecha de ingreso (disbursement_date),
+//      con created_dt como respaldo — consistente con R6 (req 10).
+//   3. Gran total ya no doble-cuenta el efectivo: "donaciones" ahora agrupa
+//      solo especie/beneficio, y granTotal = efectivo + especie/beneficio.
 const SQL = `
   WITH donations AS (
     SELECT
-      EXTRACT(YEAR    FROM pd.created_dt)::int  AS year,
-      EXTRACT(QUARTER FROM pd.created_dt)::int  AS quarter,
+      EXTRACT(YEAR    FROM COALESCE(pd.disbursement_date, pd.created_dt))::int AS year,
+      EXTRACT(QUARTER FROM COALESCE(pd.disbursement_date, pd.created_dt))::int AS quarter,
       pd.donation_type                          AS don_type,
       pd.amount                                 AS amount_cents
     FROM caderh.project_donations pd
+    JOIN caderh.projects p ON p.id = pd.project_id AND p.project_status <> 'DELETED'
   ),
   financing AS (
     SELECT
-      EXTRACT(YEAR FROM pfs.created_dt)::int    AS year,
+      EXTRACT(YEAR FROM COALESCE(pfs.disbursement_date, pfs.created_dt))::int AS year,
       pfs.amount                                AS amount_cents
     FROM caderh.project_financing_sources pfs
+    JOIN caderh.projects p ON p.id = pfs.project_id AND p.project_status <> 'DELETED'
   ),
   by_year_quarter AS (
     SELECT
       year, quarter,
       SUM(CASE WHEN don_type = 'CASH' THEN amount_cents ELSE 0 END)::bigint AS desembolsado_cents,
-      SUM(CASE WHEN don_type IN ('CASH','SUPPLY') THEN amount_cents ELSE 0 END)::bigint AS total_donaciones_cents
+      SUM(CASE WHEN don_type <> 'CASH' THEN amount_cents ELSE 0 END)::bigint AS total_donaciones_cents
     FROM donations
     WHERE ($1::int IS NULL OR year = $1)
     GROUP BY year, quarter

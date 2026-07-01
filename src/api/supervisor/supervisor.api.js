@@ -195,10 +195,11 @@ router.get("/projects", verify_token, is_authenticated,
             const result = await projects.findAndCountAll({
                 attributes: [
                     "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "project_category", "created_dt",
+                    [sequelize.literal(`("projects".total_budget / 100.0)`), "total_budget"],
                     [sequelize.literal(`(SELECT COALESCE(json_agg(json_build_object('id', u.id, 'name', u.name)), '[]') FROM caderh.projects_agents pa JOIN caderh.users u ON u.id = pa.agent_id WHERE pa.project_id = "projects".id)`), "assigned_agents"],
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id), 0)
                     ) / 100.0`), "financed_amount"],
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_expenses WHERE project_id = "projects".id), 0)
@@ -252,10 +253,11 @@ router.get("/projects/:id", verify_token, is_authenticated,
                 where: { id },
                 attributes: [
                     "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "project_category", "created_dt",
+                    [sequelize.literal(`("projects".total_budget / 100.0)`), "total_budget"],
                     [sequelize.literal(`(SELECT COALESCE(json_agg(json_build_object('id', u.id, 'name', u.name)), '[]') FROM caderh.projects_agents pa JOIN caderh.users u ON u.id = pa.agent_id WHERE pa.project_id = "projects".id)`), "assigned_agents"],
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id), 0)
                     ) / 100.0`), "financed_amount"],
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_expenses WHERE project_id = "projects".id), 0)
@@ -369,7 +371,7 @@ router.patch("/projects/:id/archive", verify_token, is_supervisor,
 router.post("/project/wizard/step1", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
-            const { project_id, name, description, objectives, start_date, end_date, accomplishments, project_category } = req.body;
+            const { project_id, name, description, objectives, start_date, end_date, accomplishments, project_category, total_budget } = req.body;
 
             // Only ADMIN and MANAGER can create new projects
             if ((!project_id || !String(project_id).trim()) && req.user_role === 'USER') {
@@ -396,6 +398,19 @@ router.post("/project/wizard/step1", verify_token, is_authenticated,
                     .map((a) => ({ text: String(a.text).trim(), completed: Boolean(a.completed) }));
             }
 
+            // total_budget: presupuesto planificado de referencia (opcional).
+            // Se guarda en centavos; null lo limpia. No afecta los ingresos.
+            let totalBudgetCents;
+            if (total_budget !== undefined) {
+                if (total_budget === null || total_budget === "") {
+                    totalBudgetCents = null;
+                } else if (!isNaN(Number(total_budget)) && Number(total_budget) >= 0) {
+                    totalBudgetCents = Math.round(Number(total_budget) * 100);
+                } else {
+                    return res.status(400).json({ message: "Presupuesto total inválido" });
+                }
+            }
+
             const payload = {
                 name: name.trim(),
                 description: description.trim(),
@@ -404,6 +419,7 @@ router.post("/project/wizard/step1", verify_token, is_authenticated,
                 end_date,
                 accomplishments: accomplishmentsArr,
                 ...(project_category && VALID_CATEGORIES.includes(project_category) ? { project_category } : {}),
+                ...(totalBudgetCents !== undefined ? { total_budget: totalBudgetCents } : {}),
             };
 
             if (project_id && String(project_id).trim()) {
@@ -605,13 +621,17 @@ router.get("/project/wizard/step4/:projectId", verify_token, is_authenticated,
             }
             const rows = await project_expenses.findAll({
                 where: { project_id: projectId },
-                attributes: ["id", "amount", "description", "expense_category_id"],
+                attributes: ["id", "amount", "description", "expense_category_id", "project_financing_source_id", "project_donation_id"],
             });
             const data = rows.map((r) => ({
                 id: r.id,
                 amount: Number(r.amount) / 100,
                 description: r.description,
                 expense_category_id: r.expense_category_id ?? null,
+                project_financing_source_id: r.project_financing_source_id ?? null,
+                project_donation_id: r.project_donation_id ?? null,
+                origin_kind: r.project_financing_source_id ? "SOURCE" : (r.project_donation_id ? "DONATION" : null),
+                origin_id: r.project_financing_source_id ?? r.project_donation_id ?? null,
             }));
             res.status(200).json({ data });
         } catch (e) {
@@ -1253,23 +1273,46 @@ router.delete("/project/:projectId/donation/:id", verify_token, is_authenticated
     }
 );
 
+// Resolve the optional origin of an expense (a project financing source or a
+// project donation). Returns { ok: true, cols } with the two nullable FK
+// columns, or { ok: false, message } when the referenced origin is invalid.
+async function resolve_expense_origin(projectId, origin_kind, origin_id) {
+    if (!origin_kind || !origin_id) {
+        return { ok: true, cols: { project_financing_source_id: null, project_donation_id: null } };
+    }
+    if (origin_kind === "SOURCE") {
+        const src = await project_financing_sources.findOne({ where: { id: origin_id, project_id: projectId } });
+        if (!src) return { ok: false, message: "Fuente de origen no encontrada en el proyecto" };
+        return { ok: true, cols: { project_financing_source_id: origin_id, project_donation_id: null } };
+    }
+    if (origin_kind === "DONATION") {
+        const don = await project_donations.findOne({ where: { id: origin_id, project_id: projectId } });
+        if (!don) return { ok: false, message: "Donación de origen no encontrada en el proyecto" };
+        return { ok: true, cols: { project_financing_source_id: null, project_donation_id: origin_id } };
+    }
+    return { ok: false, message: "origin_kind inválido (use SOURCE o DONATION)" };
+}
+
 // Add single expense
 router.post("/project/:projectId/expense", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
-            const { amount, description, expense_category_id } = req.body ?? {};
+            const { amount, description, expense_category_id, origin_kind, origin_id } = req.body ?? {};
             if (typeof amount !== "number" && typeof amount !== "string") {
                 return res.status(400).json({ message: "Se requiere amount" });
             }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
             if (!(await check_project_assignment(req, res, project))) return;
+            const origin = await resolve_expense_origin(projectId, origin_kind, origin_id);
+            if (!origin.ok) return res.status(400).json({ message: origin.message });
             const row = await project_expenses.create({
                 project_id: projectId,
                 amount: Math.round(Number(amount) * 100),
                 description: (description ?? "").toString(),
                 expense_category_id: expense_category_id || null,
+                ...origin.cols,
             });
             await project_logs.create({
                 user_id: req.user_id,
@@ -1288,7 +1331,7 @@ router.put("/project/:projectId/expense/:id", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId, id } = req.params;
-            const { amount, description, expense_category_id } = req.body ?? {};
+            const { amount, description, expense_category_id, origin_kind, origin_id } = req.body ?? {};
             if (typeof amount !== "number" && typeof amount !== "string") {
                 return res.status(400).json({ message: "Se requiere amount" });
             }
@@ -1297,10 +1340,13 @@ router.put("/project/:projectId/expense/:id", verify_token, is_authenticated,
             if (!(await check_project_assignment(req, res, project))) return;
             const row = await project_expenses.findOne({ where: { id, project_id: projectId } });
             if (!row) return res.status(404).json({ message: "Gasto no encontrado" });
+            const origin = await resolve_expense_origin(projectId, origin_kind, origin_id);
+            if (!origin.ok) return res.status(400).json({ message: origin.message });
             await row.update({
                 amount: Math.round(Number(amount) * 100),
                 description: (description ?? "").toString(),
                 expense_category_id: expense_category_id || null,
+                ...origin.cols,
             });
             await project_logs.create({
                 user_id: req.user_id,

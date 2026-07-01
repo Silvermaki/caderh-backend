@@ -158,6 +158,12 @@ export const projects = sequelize.define('projects', {
         allowNull: false,
         defaultValue: 'PROJECT',
     },
+    total_budget: {
+        // Presupuesto total planificado (centavos), solo referencia: no se suma
+        // a los ingresos recibidos.
+        type: DataTypes.BIGINT,
+        allowNull: true,
+    },
     created_dt: {
         type: DataTypes.DATE,
         allowNull: false,
@@ -293,6 +299,22 @@ export const project_expenses = sequelize.define('project_expenses', {
         allowNull: true,
         references: {
             model: 'expense_categories',
+            key: 'id'
+        }
+    },
+    project_financing_source_id: {
+        type: DataTypes.UUID,
+        allowNull: true,
+        references: {
+            model: 'project_financing_sources',
+            key: 'id'
+        }
+    },
+    project_donation_id: {
+        type: DataTypes.UUID,
+        allowNull: true,
+        references: {
+            model: 'project_donations',
             key: 'id'
         }
     },
