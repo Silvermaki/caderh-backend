@@ -49,9 +49,32 @@ const SQL = `
   ORDER BY bq.year DESC, bq.quarter ASC
 `;
 
+// % de ejecución financiera del período (criterio CADERH): gastos ejecutados
+// en efectivo ÷ ingresos recibidos en efectivo × 100. La especie queda fuera.
+// Gasto en efectivo = no imputado a una donación en especie/beneficio.
+const CASH_EXECUTION_SQL = `
+  SELECT
+    (
+      COALESCE((SELECT SUM(pfs.amount) FROM caderh.project_financing_sources pfs
+        JOIN caderh.projects p ON p.id = pfs.project_id AND p.project_status <> 'DELETED'
+        WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM COALESCE(pfs.disbursement_date, pfs.created_dt)) = $1)), 0)
+      +
+      COALESCE((SELECT SUM(pd.amount) FROM caderh.project_donations pd
+        JOIN caderh.projects p ON p.id = pd.project_id AND p.project_status <> 'DELETED'
+        WHERE pd.donation_type = 'CASH'
+          AND ($1::int IS NULL OR EXTRACT(YEAR FROM COALESCE(pd.disbursement_date, pd.created_dt)) = $1)), 0)
+    )::bigint AS ingresos_efectivo_cents,
+    COALESCE((SELECT SUM(pe.amount) FROM caderh.project_expenses pe
+      JOIN caderh.projects p ON p.id = pe.project_id AND p.project_status <> 'DELETED'
+      LEFT JOIN caderh.project_donations pdo ON pdo.id = pe.project_donation_id
+      WHERE (pe.project_donation_id IS NULL OR pdo.donation_type = 'CASH')
+        AND ($1::int IS NULL OR EXTRACT(YEAR FROM pe.created_dt) = $1)), 0)::bigint AS gastos_efectivo_cents
+`;
+
 export const handler = reportHandler(async (req) => {
   const year = req.query.year ? parseInt(req.query.year, 10) : null;
   const [rows] = await sequelize.query(SQL, { bind: [year] });
+  const [[cashExec]] = await sequelize.query(CASH_EXECUTION_SQL, { bind: [year] });
 
   const out = rows.map((r) => {
     const desembolsado = centsToLmps(r.desembolsado_cents);
@@ -67,15 +90,15 @@ export const handler = reportHandler(async (req) => {
     };
   });
 
-  const totalPresupuestoCents = rows.reduce((s, r) => s + Number(r.presupuesto_cents ?? 0), 0);
-  const totalPresupuesto = centsToLmps(totalPresupuestoCents);
-  const totalDesembolso  = out.reduce((s, r) => s + r.desembolsado, 0);
   const totalDonaciones  = out.reduce((s, r) => s + r.donaciones,  0);
   const granTotal        = out.reduce((s, r) => s + r.granTotal,   0);
 
+  const ingresosEfectivo = centsToLmps(cashExec?.ingresos_efectivo_cents ?? 0);
+  const gastosEfectivo   = centsToLmps(cashExec?.gastos_efectivo_cents ?? 0);
+
   const kpis = {
     ingresoPeriodo: granTotal,
-    pctEjecucionGlobal: totalPresupuesto > 0 ? (totalDesembolso / totalPresupuesto) * 100 : 0,
+    pctEjecucionGlobal: ingresosEfectivo > 0 ? (gastosEfectivo / ingresosEfectivo) * 100 : 0,
     donaciones: totalDonaciones,
     granTotal,
   };

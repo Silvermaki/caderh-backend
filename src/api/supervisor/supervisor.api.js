@@ -210,6 +210,16 @@ router.get("/projects", verify_token, is_authenticated,
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
                     ) / 100.0`), "cash_donations"],
+                    [sequelize.literal(`(
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
+                    ) / 100.0`), "cash_income"],
+                    [sequelize.literal(`(
+                        COALESCE((SELECT SUM(pe.amount) FROM caderh.project_expenses pe
+                            LEFT JOIN caderh.project_donations pd ON pd.id = pe.project_donation_id
+                            WHERE pe.project_id = "projects".id
+                              AND (pe.project_donation_id IS NULL OR pd.donation_type = 'CASH')), 0)
+                    ) / 100.0`), "cash_expenses"],
                 ],
                 where,
                 order: sort ? [[sort, desc]] : undefined,
@@ -268,6 +278,16 @@ router.get("/projects/:id", verify_token, is_authenticated,
                     [sequelize.literal(`(
                         COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
                     ) / 100.0`), "cash_donations"],
+                    [sequelize.literal(`(
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
+                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
+                    ) / 100.0`), "cash_income"],
+                    [sequelize.literal(`(
+                        COALESCE((SELECT SUM(pe.amount) FROM caderh.project_expenses pe
+                            LEFT JOIN caderh.project_donations pd ON pd.id = pe.project_donation_id
+                            WHERE pe.project_id = "projects".id
+                              AND (pe.project_donation_id IS NULL OR pd.donation_type = 'CASH')), 0)
+                    ) / 100.0`), "cash_expenses"],
                 ],
             });
             if (!project || project.project_status === 'DELETED') {
@@ -658,6 +678,23 @@ router.put("/project/wizard/step4/:projectId", verify_token, is_authenticated,
                 if (typeof i.amount !== "number" && typeof i.amount !== "string") {
                     return res.status(400).json({ message: "Cada item debe tener amount" });
                 }
+            }
+
+            // Guard: este endpoint reemplaza TODOS los gastos y no maneja el
+            // origen (fuente/donación). Si ya hay gastos con origen asignado,
+            // un replace-all los reclasificaría silenciosamente como efectivo
+            // y distorsionaría el % de ejecución financiera.
+            const withOrigin = await project_expenses.count({
+                where: {
+                    project_id: projectId,
+                    [Op.or]: [
+                        { project_financing_source_id: { [Op.ne]: null } },
+                        { project_donation_id: { [Op.ne]: null } },
+                    ],
+                },
+            });
+            if (withOrigin > 0) {
+                return res.status(409).json({ message: "Este proyecto tiene gastos con origen asignado; edítalos desde el detalle del proyecto" });
             }
 
             await project_expenses.destroy({ where: { project_id: projectId } });
