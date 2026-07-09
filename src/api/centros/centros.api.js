@@ -11,8 +11,11 @@ import {
     generateProcessesExcel, parseProcessesExcel,
     generateModulesExcel, parseModulesExcel,
     generateEnrollmentsExcel, parseEnrollmentsExcel,
+    generateCentrosConsolidadoExcel,
+    generateStudentsListExcel,
     validateMunicipioDepartamento,
 } from "../../utils/excel-centros.js";
+import { generateCentrosConsolidadoPdf } from "../../utils/pdf-centros.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -253,6 +256,47 @@ router.get("/centros/next-code", verify_token, is_authenticated,
             const next = maxNum + 1;
             const code = `${prefix}-${String(next).padStart(3, "0")}`;
             res.status(200).json({ data: { code, next_number: next } });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Consolidado de centros activos exportable (Excel o PDF).
+// "Áreas que brinda" = áreas técnicas distintas de los cursos activos del centro
+// (cursos → curso_areas → areas). Ordenado alfabéticamente por nombre.
+router.get("/centros/export/consolidado", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const formato = req.query.formato === "pdf" ? "pdf" : "excel";
+
+            const rows = await sequelize.query(`
+                SELECT c.codigo, c.siglas, c.nombre, c.nombre_director,
+                       d.nombre AS departamento_nombre, m.nombre AS municipio_nombre,
+                       c.direccion, c.telefono, c.email,
+                       (SELECT string_agg(DISTINCT a.nombre, ', ')
+                        FROM centros.cursos cu
+                        JOIN centros.curso_areas ca ON ca.curso_id = cu.id
+                        JOIN centros.areas a ON a.id = ca.area_id
+                        WHERE cu.centro_id = c.id AND cu.estatus = 1) AS areas
+                FROM centros.centros c
+                LEFT JOIN centros.departamentos d ON d.id = c.departamento_id
+                LEFT JOIN centros.municipios m ON m.id = c.municipio_id
+                WHERE c.estatus = 1
+                ORDER BY c.nombre ASC
+            `, { type: sequelize.QueryTypes.SELECT });
+
+            if (formato === "pdf") {
+                const buffer = await generateCentrosConsolidadoPdf(rows);
+                res.setHeader("Content-Type", "application/pdf");
+                res.setHeader("Content-Disposition", "attachment; filename=consolidado-centros.pdf");
+                return res.send(buffer);
+            }
+
+            const wb = generateCentrosConsolidadoExcel(rows);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            res.setHeader("Content-Disposition", "attachment; filename=consolidado-centros.xlsx");
+            return wb.write("consolidado-centros.xlsx", res);
         } catch (e) {
             next(e);
         }
@@ -1205,25 +1249,68 @@ function buildStudentBody(b) {
     };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// WHERE compartido para el listado y el export de estudiantes.
+// Filtros por matrícula: EXISTS sobre proceso_matriculas → procesos.
+// - curso_id: curso directo del proceso.
+// - area_id: área técnica vía junction curso_areas del curso del proceso.
+// - fuente_id: fuente de financiamiento (caderh.financing_sources, UUID) vía los
+//   proyectos vinculados al proceso (projects_processes → project_financing_sources);
+//   procesos.fuente_financiamiento_id es un entero legado sin catálogo migrado.
+function buildStudentsListWhere({ search, centro_id, curso_id, area_id, fuente_id }) {
+    const enrollmentFilters = [];
+    if (curso_id && Number.isInteger(Number(curso_id))) {
+        enrollmentFilters.push(sequelize.literal(`EXISTS (
+            SELECT 1 FROM centros.proceso_matriculas pm
+            JOIN centros.procesos p ON p.id = pm.proceso_id
+            WHERE pm.estudiante_id = "estudiantes".id AND pm.estatus = 1
+              AND p.estatus = 1 AND p.curso_id = ${Number(curso_id)}
+        )`));
+    }
+    if (area_id && Number.isInteger(Number(area_id))) {
+        enrollmentFilters.push(sequelize.literal(`EXISTS (
+            SELECT 1 FROM centros.proceso_matriculas pm
+            JOIN centros.procesos p ON p.id = pm.proceso_id
+            JOIN centros.curso_areas ca ON ca.curso_id = p.curso_id
+            WHERE pm.estudiante_id = "estudiantes".id AND pm.estatus = 1
+              AND p.estatus = 1 AND ca.area_id = ${Number(area_id)}
+        )`));
+    }
+    if (fuente_id && UUID_RE.test(String(fuente_id))) {
+        enrollmentFilters.push(sequelize.literal(`EXISTS (
+            SELECT 1 FROM centros.proceso_matriculas pm
+            JOIN centros.procesos p ON p.id = pm.proceso_id
+            JOIN caderh.projects_processes pp ON pp.process_id = p.id
+            JOIN caderh.project_financing_sources pfs ON pfs.project_id = pp.project_id
+            WHERE pm.estudiante_id = "estudiantes".id AND pm.estatus = 1
+              AND p.estatus = 1 AND pfs.financing_source_id = '${String(fuente_id)}'
+        )`));
+    }
+
+    return {
+        estatus: 1,
+        ...(centro_id ? { centro_id: Number(centro_id) } : {}),
+        ...(search
+            ? {
+                [Op.or]: [
+                    { identidad: { [Op.iLike]: `%${search}%` } },
+                    { nombres: { [Op.iLike]: `%${search}%` } },
+                    { apellidos: { [Op.iLike]: `%${search}%` } },
+                ],
+            }
+            : {}),
+        ...(enrollmentFilters.length ? { [Op.and]: enrollmentFilters } : {}),
+    };
+}
+
 router.get("/students", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
-            const { limit, offset, sort, desc, search, centro_id } = req.query;
+            const { limit, offset, sort, desc, search, centro_id, curso_id, area_id, fuente_id } = req.query;
             if (!limit || limit > 100) return res.status(400).json({ message: "Faltan campos requeridos" });
 
-            const where = {
-                estatus: 1,
-                ...(centro_id ? { centro_id: Number(centro_id) } : {}),
-                ...(search
-                    ? {
-                        [Op.or]: [
-                            { identidad: { [Op.iLike]: `%${search}%` } },
-                            { nombres: { [Op.iLike]: `%${search}%` } },
-                            { apellidos: { [Op.iLike]: `%${search}%` } },
-                        ],
-                    }
-                    : {}),
-            };
+            const where = buildStudentsListWhere({ search, centro_id, curso_id, area_id, fuente_id });
 
             const result = await sgc_estudiantes.findAndCountAll({
                 attributes: [
@@ -1238,6 +1325,40 @@ router.get("/students", verify_token, is_authenticated,
             });
 
             res.status(200).json({ data: result.rows, count: result.count });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Export del listado de estudiantes filtrado (Excel). Acepta los mismos query
+// params que GET /students (centro_id, curso_id, area_id, fuente_id, search)
+// sin paginación, con límite sano de 20000 filas.
+// NOTE: must be registered BEFORE "/students/:id" to avoid the param route
+// capturing "export" as an id (mismo patrón que /centros/next-code).
+router.get("/students/export", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const { search, centro_id, curso_id, area_id, fuente_id } = req.query;
+            const where = buildStudentsListWhere({ search, centro_id, curso_id, area_id, fuente_id });
+
+            const rows = await sgc_estudiantes.findAll({
+                attributes: [
+                    "id", "nombres", "apellidos", "identidad", "sexo", "telefono", "celular", "email",
+                    [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "estudiantes".centro_id)`), "centro_nombre"],
+                    [sequelize.literal(`(SELECT d.nombre FROM centros.departamentos d WHERE d.id = "estudiantes".departamento_id)`), "departamento_nombre"],
+                    [sequelize.literal(`(SELECT m.nombre FROM centros.municipios m WHERE m.id = "estudiantes".municipio_id)`), "municipio_nombre"],
+                ],
+                where,
+                order: [["nombres", "ASC"], ["apellidos", "ASC"]],
+                limit: 20000,
+                raw: true,
+            });
+
+            const wb = generateStudentsListExcel(rows);
+            res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+            res.setHeader("Content-Disposition", "attachment; filename=estudiantes.xlsx");
+            return wb.write("estudiantes.xlsx", res);
         } catch (e) {
             next(e);
         }
@@ -1453,8 +1574,20 @@ router.get("/students/:studentId/enrollments", verify_token, is_authenticated,
             const all = req.query.all === "true";
             const rows = await sequelize.query(`
                 SELECT pm.id, pm.proceso_id, p.nombre AS proceso_nombre, p.codigo AS proceso_codigo,
-                       p.fecha_inicial, p.fecha_final, c.nombre AS centro_nombre,
+                       p.fecha_inicial, p.fecha_final, p.horario, c.nombre AS centro_nombre,
                        cur.nombre AS curso_nombre,
+                       (SELECT string_agg(DISTINCT a.nombre, ', ')
+                        FROM centros.curso_areas ca
+                        JOIN centros.areas a ON a.id = ca.area_id
+                        WHERE ca.curso_id = p.curso_id) AS area_nombre,
+                       -- Fuente de financiamiento: procesos.fuente_financiamiento_id es un entero
+                       -- legado sin catálogo migrado, así que el nombre se resuelve vía los
+                       -- proyectos vinculados al proceso (caderh.financing_sources).
+                       (SELECT string_agg(DISTINCT fs.name, ', ')
+                        FROM caderh.projects_processes pp
+                        JOIN caderh.project_financing_sources pfs ON pfs.project_id = pp.project_id
+                        JOIN caderh.financing_sources fs ON fs.id = pfs.financing_source_id
+                        WHERE pp.process_id = p.id) AS fuente_financiamiento,
                        (SELECT COUNT(*)::int FROM centros.proceso_matriculas pm2 WHERE pm2.proceso_id = p.id AND pm2.estatus = 1) AS enrolled_count
                 FROM centros.proceso_matriculas pm
                 JOIN centros.procesos p ON p.id = pm.proceso_id
@@ -1960,13 +2093,25 @@ router.get("/processes/:id", verify_token, is_authenticated,
                 attributes: [
                     "id", "codigo", "centro_id", "nombre", "instructor_id", "curso_id",
                     "metodologia_id", "otra_metodologia", "fecha_inicial", "fecha_final",
-                    "duracion_horas", "tipo_jornada_id", "horario", "dias", "sede", "lugar",
+                    "duracion_horas", "tipo_jornada_id", "horario", "dias", "sede", "lugar", "cancelado",
                     [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "procesos".centro_id)`), "centro_nombre"],
                     [sequelize.literal(`(SELECT cu.nombre FROM centros.cursos cu WHERE cu.id = "procesos".curso_id)`), "curso_nombre"],
                     [sequelize.literal(`(SELECT CONCAT(i.nombres, ' ', i.apellidos) FROM centros.instructors i WHERE i.id = "procesos".instructor_id)`), "instructor_nombre"],
                     [sequelize.literal(`(SELECT m.nombre FROM centros.metodologias m WHERE m.id = "procesos".metodologia_id)`), "metodologia_nombre"],
                     [sequelize.literal(`(SELECT tj.nombre FROM centros.tipo_jornadas tj WHERE tj.id = "procesos".tipo_jornada_id)`), "tipo_jornada_nombre"],
+                    // Fuente de financiamiento: procesos.fuente_financiamiento_id es un entero legado
+                    // sin catálogo migrado; el nombre se resuelve vía los proyectos vinculados.
+                    [sequelize.literal(`(SELECT string_agg(DISTINCT fs.name, ', ')
+                        FROM caderh.projects_processes pp
+                        JOIN caderh.project_financing_sources pfs ON pfs.project_id = pp.project_id
+                        JOIN caderh.financing_sources fs ON fs.id = pfs.financing_source_id
+                        WHERE pp.process_id = "procesos".id)`), "fuente_financiamiento"],
                     [sequelize.literal(`(SELECT COUNT(*) FROM centros.proceso_matriculas pm WHERE pm.proceso_id = "procesos".id AND pm.estatus = 1)::int`), "enrolled_count"],
+                    // Desglose por género de los matriculados. El SGC guarda
+                    // 'Masculino'/'Femenino' y lo nuevo 'M'/'F': se normaliza por
+                    // la inicial (mismo criterio que el reporte R1).
+                    [sequelize.literal(`(SELECT COUNT(*) FROM centros.proceso_matriculas pm JOIN centros.estudiantes e ON e.id = pm.estudiante_id WHERE pm.proceso_id = "procesos".id AND pm.estatus = 1 AND UPPER(LEFT(TRIM(e.sexo), 1)) = 'M')::int`), "enrolled_male_count"],
+                    [sequelize.literal(`(SELECT COUNT(*) FROM centros.proceso_matriculas pm JOIN centros.estudiantes e ON e.id = pm.estudiante_id WHERE pm.proceso_id = "procesos".id AND pm.estatus = 1 AND UPPER(LEFT(TRIM(e.sexo), 1)) = 'F')::int`), "enrolled_female_count"],
                     [sequelize.literal(`(SELECT COUNT(*) FROM centros.curso_modulos cm WHERE cm.curso_id = "procesos".curso_id)::int`), "module_count"],
                     [sequelize.literal(`(SELECT COUNT(*) FROM caderh.projects_processes pp WHERE pp.process_id = "procesos".id)::int`), "project_count"],
                 ],
@@ -2047,6 +2192,8 @@ router.put("/processes", verify_token, is_supervisor,
                 dias: b.dias.trim(),
                 sede: b.sede ?? 0,
                 lugar: b.lugar?.trim() || null,
+                // Estatus de cancelación explícito (solo si viene en el body)
+                ...(b.cancelado !== undefined ? { cancelado: !!b.cancelado } : {}),
             }, { where: { id: b.id } });
 
             await user_logs.create({ user_id: req.user_id, log: `Actualizó proceso educativo ID: ${b.id}` });

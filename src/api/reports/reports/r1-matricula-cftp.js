@@ -94,13 +94,20 @@ const SQL = `
     anio,
     trimestre,
     edad,
+    -- Fuente(s) de financiamiento del proyecto de la fila. Subconsulta
+    -- correlacionada sobre el project_id agrupado — nunca un JOIN en el FROM
+    -- del agregado, para no multiplicar los conteos del pivot.
+    (SELECT STRING_AGG(DISTINCT fs.name, ', ' ORDER BY fs.name)
+       FROM caderh.project_financing_sources pfs
+       JOIN caderh.financing_sources fs ON fs.id = pfs.financing_source_id
+       WHERE pfs.project_id = matricula_filtered.project_id)                           AS fuentes,
     COUNT(*) FILTER (WHERE genero = 'M')::int                                          AS hombres,
     COUNT(*) FILTER (WHERE genero = 'F')::int                                          AS mujeres,
     COUNT(*) FILTER (WHERE LOWER(COALESCE(tipo_formacion,'normal')) = 'normal')::int   AS formacion_normal,
     COUNT(*) FILTER (WHERE LOWER(COALESCE(tipo_formacion,'')) = 'dual')::int           AS formacion_dual,
     COUNT(*)::int                                                                      AS total
   FROM matricula_filtered
-  GROUP BY project_name, ciudad, centro_id, centro_name, centro_siglas,
+  GROUP BY project_id, project_name, ciudad, centro_id, centro_name, centro_siglas,
            curso_id, curso_name, area_tecnica, anio, trimestre, edad
   ORDER BY ciudad NULLS LAST, centro_name, curso_name, anio NULLS LAST, trimestre NULLS LAST, edad NULLS LAST
 `;
@@ -169,6 +176,7 @@ export const handler = reportHandler(async (req) => {
 
   const out = rows.map((r) => ({
     proyecto: r.project_name ?? '—',
+    fuentes: r.fuentes ?? '—',
     ciudad: r.ciudad ?? '—',
     centroId: r.centro_id,
     centro: r.centro_siglas ? `${r.centro_siglas} — ${r.centro_name}` : r.centro_name,

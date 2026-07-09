@@ -65,6 +65,14 @@ const SQL = `
        FROM centros.curso_areas ca
        JOIN centros.areas a ON a.id = ca.area_id
        WHERE ca.curso_id = proc.curso_id)          AS area_tecnica,
+    -- Fuente(s) de financiamiento de los proyectos vinculados al proceso de la
+    -- matrícula. Subconsulta correlacionada para no multiplicar filas cuando
+    -- un proceso tiene varios proyectos/fuentes.
+    (SELECT STRING_AGG(DISTINCT fs.name, ', ' ORDER BY fs.name)
+       FROM caderh.projects_processes pp2
+       JOIN caderh.project_financing_sources pfs2 ON pfs2.project_id = pp2.project_id
+       JOIN caderh.financing_sources fs           ON fs.id = pfs2.financing_source_id
+       WHERE pp2.process_id = proc.id)             AS fuentes_financiamiento,
     EXTRACT(YEAR    FROM proc.fecha_inicial)::int  AS anio,
     EXTRACT(QUARTER FROM proc.fecha_inicial)::int  AS trimestre,
     CONCAT(e.nombres, ' ', e.apellidos)            AS nombre_completo,
@@ -147,6 +155,51 @@ function parseGender(raw) {
   return arr.length ? arr : null;
 }
 
+// Catálogo "¿Con quién vive?" — fuente: src/api/centros/centros.api.js
+// (GET /centros/vive-catalogo). El SGC heredado guardó el campo como arreglo
+// JSON de ids posicionales (1..5) sobre este mismo catálogo; los registros
+// nuevos guardan el label directamente.
+const VIVE_LABELS = {
+  1: 'Padres',
+  2: 'Solo(a)',
+  3: 'Pareja',
+  4: 'Familiares',
+  5: 'Otros',
+};
+
+// '["1"]' → 'Padres' · '["1","3"]' → 'Padres, Pareja' · 'Padres' → 'Padres'.
+// Defensivo con null/vacío/JSON malformado: devuelve null o el texto crudo.
+function formatConQuienVive(raw) {
+  if (raw == null) return null;
+  // El SGC guardó el JSON con comillas escapadas literales (ej. [\"1\"]);
+  // se limpian los backslashes antes de parsear.
+  const s = String(raw).trim().replace(/\\/g, '');
+  if (!s || s.toLowerCase() === 'null') return null;
+  if (s.startsWith('[')) {
+    try {
+      const arr = JSON.parse(s);
+      if (Array.isArray(arr)) {
+        const labels = arr
+          .map((v) => VIVE_LABELS[parseInt(String(v), 10)] ?? String(v).trim())
+          .filter(Boolean);
+        return labels.length ? labels.join(', ') : null;
+      }
+    } catch {
+      // JSON malformado — se muestra el texto tal cual
+    }
+  }
+  return s;
+}
+
+// discapacidad_id es TEXT libre; vacío o el literal 'null' se normaliza a null
+// para que el frontend pinte '—' en vez del string 'null'.
+function cleanText(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!s || s.toLowerCase() === 'null') return null;
+  return s;
+}
+
 export const handler = reportHandler(async (req) => {
   const projectUuids     = parseUuids(req.query.project);
   const centroIds        = parseInts(req.query.cftp);
@@ -181,8 +234,14 @@ export const handler = reportHandler(async (req) => {
 
   const total = countRows[0]?.total ?? 0;
 
+  const out = rows.map((r) => ({
+    ...r,
+    con_quien_vive: formatConQuienVive(r.con_quien_vive),
+    discapacidad: cleanText(r.discapacidad),
+  }));
+
   return {
-    rows,
+    rows: out,
     total,
     kpis: {
       totalRegistros: total,

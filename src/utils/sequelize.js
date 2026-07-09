@@ -676,6 +676,8 @@ export const sgc_procesos = sequelize.define('procesos', {
     sede: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     lugar: { type: DataTypes.TEXT, allowNull: true },
     fuente_financiamiento_id: { type: DataTypes.INTEGER, allowNull: true, defaultValue: null },
+    // Cancelación explícita del proceso (requiere migración 1772200000000_proceso-cancelado.sql)
+    cancelado: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 0 },
 }, { schema: "centros", tableName: "procesos", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
 

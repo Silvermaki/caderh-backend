@@ -190,7 +190,7 @@ export function generateStudentsExcel(rows, catalogs, protectedIds) {
         "Beneficios Empleo", "Beneficios Empleo Otro",
         "Autoempleo", "Autoempleo Dedicacion", "Autoempleo Otro", "Autoempleo Tiempo",
         "Dias Semana Trabajo", "Horas Dia Trabajo", "Socios", "Socios Cantidad",
-        "Especial", "Discapacidad ID", "Riesgo Social", "Etnia ID", "Interno",
+        "Especial", "Discapacidad ID", "Etnia ID", "Interno",
         "Nombre Ref.", "Telefono Ref.", "Datos Ref.", "Parentesco Ref.", "Adicional Ref.",
     ];
     const widths = [
@@ -205,7 +205,7 @@ export function generateStudentsExcel(rows, catalogs, protectedIds) {
         20, 20,
         12, 20, 20, 16,
         18, 16, 10, 14,
-        10, 16, 14, 10, 10,
+        10, 16, 10, 10,
         22, 16, 20, 16, 20,
     ];
     const refCols = new Set([10, 12, 22]); // Departamento name, Municipio name, Nivel Escolaridad name
@@ -238,7 +238,7 @@ export function generateStudentsExcel(rows, catalogs, protectedIds) {
             r.beneficios_empleo || "", r.beneficios_empleo_otro || "",
             r.autoempleo ?? 0, r.autoempleo_dedicacion || "", r.autoempleo_otro || "", r.autoempleo_tiempo || "",
             r.dias_semana_trabajo || "", r.horas_dia_trabajo || "", r.socios ?? 0, r.socios_cantidad ?? 0,
-            r.especial ?? 0, r.discapacidad_id || "", r.riesgo_social ?? 0, r.etnia_id || "", r.interno ?? 0,
+            r.especial ?? 0, r.discapacidad_id || "", r.etnia_id || "", r.interno ?? 0,
             r.nombre_r || "", r.telefono_r || "", r.datos_r || "", r.parentesco_r || "", r.adicional_r || "",
         ];
 
@@ -515,7 +515,8 @@ export function parseStudentsExcel(buffer) {
             socios: intOrZero(row["Socios"]), socios_cantidad: intOrZero(row["Socios Cantidad"]),
             especial: intOrZero(row["Especial"]),
             discapacidad_id: strOrNull(row["Discapacidad ID"]),
-            riesgo_social: intOrZero(row["Riesgo Social"]),
+            // riesgo_social ya no se parsea: la columna se quitó de la plantilla y así
+            // el import no pisa el valor histórico (mismo patrón que comunidad en cursos).
             etnia_id: strOrNull(row["Etnia ID"]),
             interno: intOrZero(row["Interno"]),
             nombre_r: strOrNull(row["Nombre Ref."]), telefono_r: strOrNull(row["Telefono Ref."]),
@@ -775,6 +776,78 @@ export function generateEnrollmentsExcel(rows, studentsCatalog) {
             vals.forEach((val, col) => writeCell(wsCat, row, col + 1, val, base));
         });
     }
+
+    return wb;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GENERATE: Consolidado de Centros (solo export, sin import)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export function generateCentrosConsolidadoExcel(rows) {
+    const wb = new xl.Workbook();
+    const s = createStyles(wb);
+    const ws = wb.addWorksheet("Consolidado de Centros");
+
+    const headers = [
+        "Código", "Siglas", "Nombre", "Director", "Departamento", "Municipio",
+        "Dirección", "Teléfono", "Email", "Áreas que brinda",
+    ];
+    const widths = [12, 12, 40, 28, 18, 18, 40, 16, 28, 50];
+
+    headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(s.header));
+    widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
+    ws.row(1).freeze();
+
+    rows.forEach((r, idx) => {
+        const row = idx + 2;
+        const base = idx % 2 !== 0 ? s.cellAlt : s.cell;
+
+        const vals = [
+            r.codigo || "", r.siglas || "", r.nombre || "", r.nombre_director || "",
+            r.departamento_nombre || "", r.municipio_nombre || "",
+            r.direccion || "", r.telefono || "", r.email || "", r.areas || "",
+        ];
+
+        vals.forEach((val, col) => writeCell(ws, row, col + 1, val, base));
+    });
+
+    return wb;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GENERATE: Listado de Estudiantes filtrado (solo export, sin import)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export function generateStudentsListExcel(rows) {
+    const wb = new xl.Workbook();
+    const s = createStyles(wb);
+    const ws = wb.addWorksheet("Estudiantes");
+
+    const headers = [
+        "Centro", "Nombres", "Apellidos", "Identidad", "Sexo",
+        "Teléfono", "Email", "Departamento", "Municipio",
+    ];
+    const widths = [40, 22, 22, 18, 12, 16, 28, 18, 18];
+
+    headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(s.header));
+    widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
+    ws.row(1).freeze();
+
+    const sexoLabel = (v) => (v === "M" ? "Masculino" : v === "F" ? "Femenino" : (v || ""));
+
+    rows.forEach((r, idx) => {
+        const row = idx + 2;
+        const base = idx % 2 !== 0 ? s.cellAlt : s.cell;
+
+        const vals = [
+            r.centro_nombre || "", r.nombres || "", r.apellidos || "", r.identidad || "",
+            sexoLabel(r.sexo), r.telefono || r.celular || "", r.email || "",
+            r.departamento_nombre || "", r.municipio_nombre || "",
+        ];
+
+        vals.forEach((val, col) => writeCell(ws, row, col + 1, val, base));
+    });
 
     return wb;
 }
