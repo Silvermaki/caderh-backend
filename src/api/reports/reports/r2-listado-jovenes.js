@@ -11,6 +11,7 @@ import { reportHandler, parsePagination } from '../shared.js';
 //
 // Schema notes:
 //   - centros.estudiantes.fecha_nacimiento es TEXT — guard con regex antes de cast.
+//     El guard exige años 19xx/20xx: la data SGC trae fechas con año 0000 (el cast a date revienta) y años 0021-0200 (edades absurdas).
 //   - centros.estudiantes.sexo es TEXT libre — normalización con CASE explícito.
 //   - centro mostrado = el centro del proceso (no el centro origen del estudiante),
 //     porque el reporte es sobre participación formativa.
@@ -41,14 +42,14 @@ const BASE_WHERE = `
         ))
     AND ($8::int IS NULL OR (
           CASE
-            WHEN e.fecha_nacimiento ~ '^\\d{4}-\\d{2}-\\d{2}'
+            WHEN e.fecha_nacimiento ~ '^(19|20)\\d{2}-\\d{2}-\\d{2}'
               THEN DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento::date))::int
             ELSE NULL
           END >= $8
         ))
     AND ($9::int IS NULL OR (
           CASE
-            WHEN e.fecha_nacimiento ~ '^\\d{4}-\\d{2}-\\d{2}'
+            WHEN e.fecha_nacimiento ~ '^(19|20)\\d{2}-\\d{2}-\\d{2}'
               THEN DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento::date))::int
             ELSE NULL
           END <= $9
@@ -79,7 +80,7 @@ const SQL = `
     e.identidad                                    AS dni,
     e.fecha_nacimiento                             AS fecha_nacimiento,
     CASE
-      WHEN e.fecha_nacimiento ~ '^\\d{4}-\\d{2}-\\d{2}'
+      WHEN e.fecha_nacimiento ~ '^(19|20)\\d{2}-\\d{2}-\\d{2}'
         THEN DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento::date))::int
       ELSE NULL
     END                                            AS edad,

@@ -39,7 +39,7 @@ const SQL = `
       EXTRACT(YEAR    FROM proc.fecha_inicial)::int  AS anio,
       EXTRACT(QUARTER FROM proc.fecha_inicial)::int  AS trimestre,
       CASE
-        WHEN e.fecha_nacimiento ~ '^\\d{4}-\\d{2}-\\d{2}'
+        WHEN e.fecha_nacimiento ~ '^(19|20)\\d{2}-\\d{2}-\\d{2}'
           THEN DATE_PART('year', AGE(proc.fecha_inicial, e.fecha_nacimiento::date))::int
         ELSE NULL
       END                                 AS edad,

@@ -11,6 +11,7 @@ import { reportHandler } from '../shared.js';
 //     Para evitar doble-conteo cuando un curso tiene varias áreas, agregamos las
 //     áreas como string con STRING_AGG en subquery.
 //   - centros.estudiantes.fecha_nacimiento es TEXT, no DATE; casteamos con guard.
+//     El guard exige años 19xx/20xx: la data SGC trae fechas con año 0000 (el cast a date revienta) y años 0021-0200 (edades absurdas).
 //   - centros.estudiantes.sexo es TEXT libre — normalizamos con CASE explícito
 //     (Masculino/M/Hombre vs Femenino/F/Mujer) en vez de LIKE 'M%' que rompe con "Mujer".
 //   - año/trimestre se derivan de proc.fecha_inicial (DATE), no de created_at.
@@ -33,7 +34,7 @@ const SQL = `
       EXTRACT(YEAR    FROM proc.fecha_inicial)::int  AS anio,
       EXTRACT(QUARTER FROM proc.fecha_inicial)::int  AS trimestre,
       CASE
-        WHEN e.fecha_nacimiento ~ '^\\d{4}-\\d{2}-\\d{2}'
+        WHEN e.fecha_nacimiento ~ '^(19|20)\\d{2}-\\d{2}-\\d{2}'
           THEN DATE_PART('year', AGE(proc.fecha_inicial, e.fecha_nacimiento::date))::int
         ELSE NULL
       END                                 AS edad,
