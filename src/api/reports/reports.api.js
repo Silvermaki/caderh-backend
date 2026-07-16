@@ -60,8 +60,9 @@ router.use(verify_token, is_authenticated);
 // ─── Metadatos ligeros para filtros ─────────────────────────────────────────
 // GET /reports/meta/years → { min, max } para el selector de año dinámico.
 // min = menor año con datos entre centros.procesos.fecha_inicial y
-// caderh.project_financing_sources (COALESCE(disbursement_date, created_dt));
-// max = año actual. Defensivo: si no hay datos (o falla la consulta), min=2018.
+// caderh.project_financing_sources (disbursement_date, NOT NULL desde la
+// migración 1772330000000); max = año actual. Defensivo: si no hay datos (o
+// falla la consulta), min=2018.
 router.get('/meta/years', async (req, res) => {
   const FALLBACK_MIN = 2018;
   const maxYear = new Date().getFullYear();
@@ -72,7 +73,7 @@ router.get('/meta/years', async (req, res) => {
         COALESCE((SELECT MIN(EXTRACT(YEAR FROM p.fecha_inicial))::int
                     FROM centros.procesos p
                    WHERE p.fecha_inicial IS NOT NULL), $1),
-        COALESCE((SELECT MIN(EXTRACT(YEAR FROM COALESCE(pfs.disbursement_date, pfs.created_dt)))::int
+        COALESCE((SELECT MIN(EXTRACT(YEAR FROM pfs.disbursement_date))::int
                     FROM caderh.project_financing_sources pfs), $1)
       ) AS min_year
       `,

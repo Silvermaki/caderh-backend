@@ -17,6 +17,54 @@ const excelUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const router = Router();
 
+// ─── Validación de montos y fechas de movimientos (migración 1772330000000) ──
+// Regla del cliente: solo se registran movimientos (gastos, desembolsos de
+// fuentes y donaciones) DENTRO del período de ejecución del proyecto, con
+// fecha de negocio obligatoria y monto > 0.
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// 'YYYY-MM-DD[...]' | Date → 'YYYY-MM-DD' (o null si no es una fecha válida).
+function to_date_only(value) {
+    if (!value) return null;
+    if (value instanceof Date) {
+        if (isNaN(value.getTime())) return null;
+        const p = (n) => String(n).padStart(2, "0");
+        return `${value.getFullYear()}-${p(value.getMonth() + 1)}-${p(value.getDate())}`;
+    }
+    const s = String(value).trim().slice(0, 10);
+    if (!ISO_DATE_RE.test(s)) return null;
+    const d = new Date(`${s}T00:00:00Z`);
+    if (isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== s) return null;
+    return s;
+}
+
+// Monto en Lempiras → centavos enteros > 0, o null si es inválido o <= 0.
+function to_positive_cents(amount) {
+    if (typeof amount !== "number" && typeof amount !== "string") return null;
+    if (String(amount).trim() === "") return null;
+    const n = Number(amount);
+    if (!Number.isFinite(n)) return null;
+    const cents = Math.round(n * 100);
+    return cents > 0 ? cents : null;
+}
+
+// Valida que la fecha de un movimiento exista (ISO) y caiga dentro de la
+// vigencia start_date..end_date del proyecto.
+// Devuelve { value: 'YYYY-MM-DD' } o { error: 'mensaje 400' }.
+function validate_movement_date(project, dateValue, label) {
+    const iso = to_date_only(dateValue);
+    if (!iso) {
+        return { error: `${label} es requerida y debe tener formato AAAA-MM-DD` };
+    }
+    const start = to_date_only(project.start_date);
+    const end = to_date_only(project.end_date);
+    if ((start && iso < start) || (end && iso > end)) {
+        return { error: `La fecha ${iso} está fuera de la vigencia del proyecto (${start} — ${end})` };
+    }
+    return { value: iso };
+}
+
 
 router.post('/test', verify_token, is_supervisor,
     async (req, res, next) => {
@@ -45,7 +93,7 @@ router.post('/financing-source', verify_token, is_supervisor,
 
             const existing = await financing_sources.findOne({ where: { name: { [Op.iLike]: name.trim() } } });
             if (existing) {
-                return res.status(400).json({ message: 'Fuente de financiamiento con este nombre ya existe' });
+                return res.status(409).json({ message: 'Ya existe una fuente con ese nombre' });
             }
 
             const fsrc = await financing_sources.create({
@@ -60,6 +108,11 @@ router.post('/financing-source', verify_token, is_supervisor,
 
             res.status(200).json({ ok: true });
         } catch (e) {
+            // UNIQUE lower(trim(name)) de la migración 1772330000000: cubre las
+            // variantes por mayúsculas/espacios que el pre-check con iLike no ve.
+            if (e.name === "SequelizeUniqueConstraintError") {
+                return res.status(409).json({ message: 'Ya existe una fuente con ese nombre' });
+            }
             next(e);
         }
     }
@@ -123,7 +176,7 @@ router.put('/financing-source', verify_token, is_supervisor,
             if (typeof description !== 'string' || description.trim().length < 5) return res.status(400).json({ message: 'Descripción inválida' });
 
             const existing = await financing_sources.findOne({ where: { name: { [Op.iLike]: name.trim() }, id: { [Op.ne]: id } } });
-            if (existing) return res.status(400).json({ message: 'Otra fuente con este nombre ya existe' });
+            if (existing) return res.status(409).json({ message: 'Ya existe una fuente con ese nombre' });
 
             await financing_sources.update({ name: name.trim(), description: description.trim() }, { where: { id } });
 
@@ -134,6 +187,9 @@ router.put('/financing-source', verify_token, is_supervisor,
 
             res.status(200).json({ ok: true });
         } catch (e) {
+            if (e.name === "SequelizeUniqueConstraintError") {
+                return res.status(409).json({ message: 'Ya existe una fuente con ese nombre' });
+            }
             next(e);
         }
     }
@@ -514,27 +570,37 @@ router.put("/project/wizard/step2/:projectId", verify_token, is_authenticated,
             }
             if (!(await check_project_assignment(req, res, project))) return;
 
+            // Validación post-recaptura (migración 1772330000000): monto > 0 y
+            // fecha de ingreso obligatoria dentro de la vigencia del proyecto.
+            const normalized = [];
             for (const i of arr) {
-                if (!i.financing_source_id || (typeof i.amount !== "number" && typeof i.amount !== "string")) {
+                if (!i.financing_source_id) {
                     return res.status(400).json({ message: "Cada item debe tener financing_source_id y amount" });
+                }
+                const cents = to_positive_cents(i.amount);
+                if (cents === null) {
+                    return res.status(400).json({ message: "El monto de cada fuente debe ser un número mayor que 0" });
+                }
+                const fecha = validate_movement_date(project, i.disbursement_date, "La fecha de ingreso");
+                if (fecha.error) {
+                    return res.status(400).json({ message: fecha.error });
                 }
                 const srcExists = await financing_sources.findOne({ where: { id: i.financing_source_id } });
                 if (!srcExists) {
                     return res.status(400).json({ message: `Fuente de financiamiento no encontrada: ${i.financing_source_id}` });
                 }
+                normalized.push({
+                    project_id: projectId,
+                    financing_source_id: i.financing_source_id,
+                    amount: cents,
+                    description: (i.description ?? "").toString(),
+                    disbursement_date: fecha.value,
+                });
             }
 
             await project_financing_sources.destroy({ where: { project_id: projectId } });
-            if (arr.length > 0) {
-                await project_financing_sources.bulkCreate(
-                    arr.map((i) => ({
-                        project_id: projectId,
-                        financing_source_id: i.financing_source_id,
-                        amount: Math.round(Number(i.amount) * 100),
-                        description: (i.description ?? "").toString(),
-                        disbursement_date: i.disbursement_date || null,
-                    }))
-                );
+            if (normalized.length > 0) {
+                await project_financing_sources.bulkCreate(normalized);
             }
 
             await project_logs.create({
@@ -594,27 +660,37 @@ router.put("/project/wizard/step3/:projectId", verify_token, is_authenticated,
             }
             if (!(await check_project_assignment(req, res, project))) return;
 
+            // Validación post-recaptura (migración 1772330000000): monto > 0 y
+            // fecha de ingreso obligatoria dentro de la vigencia del proyecto.
+            const normalized = [];
             for (const i of arr) {
-                if ((typeof i.amount !== "number" && typeof i.amount !== "string") || !VALID_TYPES.includes(i.donation_type)) {
+                if (!VALID_TYPES.includes(i.donation_type)) {
                     return res.status(400).json({ message: "Cada item debe tener amount y donation_type (CASH, SUPPLY o BENEFIT)" });
                 }
                 if (typeof i.donor_name !== "string" || i.donor_name.trim().length === 0) {
                     return res.status(400).json({ message: "Cada donación debe indicar el donante" });
                 }
+                const cents = to_positive_cents(i.amount);
+                if (cents === null) {
+                    return res.status(400).json({ message: "El monto de cada donación debe ser un número mayor que 0" });
+                }
+                const fecha = validate_movement_date(project, i.disbursement_date, "La fecha de ingreso");
+                if (fecha.error) {
+                    return res.status(400).json({ message: fecha.error });
+                }
+                normalized.push({
+                    project_id: projectId,
+                    amount: cents,
+                    description: (i.description ?? "").toString(),
+                    donor_name: i.donor_name.trim(),
+                    donation_type: i.donation_type,
+                    disbursement_date: fecha.value,
+                });
             }
 
             await project_donations.destroy({ where: { project_id: projectId } });
-            if (arr.length > 0) {
-                await project_donations.bulkCreate(
-                    arr.map((i) => ({
-                        project_id: projectId,
-                        amount: Math.round(Number(i.amount) * 100),
-                        description: (i.description ?? "").toString(),
-                        donor_name: i.donor_name.trim(),
-                        donation_type: i.donation_type,
-                        disbursement_date: i.disbursement_date || null,
-                    }))
-                );
+            if (normalized.length > 0) {
+                await project_donations.bulkCreate(normalized);
             }
 
             await project_logs.create({
@@ -641,12 +717,13 @@ router.get("/project/wizard/step4/:projectId", verify_token, is_authenticated,
             }
             const rows = await project_expenses.findAll({
                 where: { project_id: projectId },
-                attributes: ["id", "amount", "description", "expense_category_id", "project_financing_source_id", "project_donation_id"],
+                attributes: ["id", "amount", "description", "expense_date", "expense_category_id", "project_financing_source_id", "project_donation_id"],
             });
             const data = rows.map((r) => ({
                 id: r.id,
                 amount: Number(r.amount) / 100,
                 description: r.description,
+                expense_date: r.expense_date ?? null,
                 expense_category_id: r.expense_category_id ?? null,
                 project_financing_source_id: r.project_financing_source_id ?? null,
                 project_donation_id: r.project_donation_id ?? null,
@@ -674,10 +751,25 @@ router.put("/project/wizard/step4/:projectId", verify_token, is_authenticated,
             }
             if (!(await check_project_assignment(req, res, project))) return;
 
+            // Validación post-recaptura (migración 1772330000000): monto > 0 y
+            // fecha del gasto obligatoria dentro de la vigencia del proyecto.
+            const normalized = [];
             for (const i of arr) {
-                if (typeof i.amount !== "number" && typeof i.amount !== "string") {
-                    return res.status(400).json({ message: "Cada item debe tener amount" });
+                const cents = to_positive_cents(i.amount);
+                if (cents === null) {
+                    return res.status(400).json({ message: "El monto de cada gasto debe ser un número mayor que 0" });
                 }
+                const fecha = validate_movement_date(project, i.expense_date, "La fecha del gasto");
+                if (fecha.error) {
+                    return res.status(400).json({ message: fecha.error });
+                }
+                normalized.push({
+                    project_id: projectId,
+                    amount: cents,
+                    description: (i.description ?? "").toString(),
+                    expense_date: fecha.value,
+                    expense_category_id: i.expense_category_id || null,
+                });
             }
 
             // Guard: este endpoint reemplaza TODOS los gastos y no maneja el
@@ -698,15 +790,8 @@ router.put("/project/wizard/step4/:projectId", verify_token, is_authenticated,
             }
 
             await project_expenses.destroy({ where: { project_id: projectId } });
-            if (arr.length > 0) {
-                await project_expenses.bulkCreate(
-                    arr.map((i) => ({
-                        project_id: projectId,
-                        amount: Math.round(Number(i.amount) * 100),
-                        description: (i.description ?? "").toString(),
-                        expense_category_id: i.expense_category_id || null,
-                    }))
-                );
+            if (normalized.length > 0) {
+                await project_expenses.bulkCreate(normalized);
             }
 
             await project_logs.create({
@@ -887,21 +972,29 @@ router.post("/project/:projectId/excel/financing-sources", verify_token, is_auth
 
             const { parsed, errors } = parseFinancingSourcesExcel(req.file.buffer);
 
-            // Validate financing_source_ids exist
+            // Validate financing_source_ids exist + vigencia del proyecto
             const allSources = await financing_sources.findAll({ attributes: ["id"] });
             const validSourceIds = new Set(allSources.map((s) => s.id));
             const validRows = [];
             for (const row of parsed) {
                 if (!validSourceIds.has(row.financing_source_id)) {
                     errors.push({ row: parsed.indexOf(row) + 2, message: `financing_source_id no encontrado: ${row.financing_source_id}` });
-                } else {
-                    validRows.push(row);
+                    continue;
                 }
+                const fecha = validate_movement_date(project, row.disbursement_date, "La fecha de ingreso");
+                if (fecha.error) {
+                    errors.push({ row: parsed.indexOf(row) + 2, message: fecha.error });
+                    continue;
+                }
+                validRows.push({ ...row, disbursement_date: fecha.value });
             }
 
             const existingRows = await project_financing_sources.findAll({ where: { project_id: projectId } });
             const existingIds = new Set(existingRows.map((r) => r.id));
-            const excelIds = new Set(validRows.filter((r) => r.id).map((r) => r.id));
+            // excelIds se calcula sobre TODAS las filas del archivo (aun las
+            // inválidas) para no borrar un registro existente solo porque su
+            // fila del Excel falló la validación.
+            const excelIds = new Set(parsed.filter((r) => r.id).map((r) => r.id));
 
             let processed = 0;
 
@@ -986,8 +1079,22 @@ router.post("/project/:projectId/excel/donations", verify_token, is_authenticate
 
             const { parsed, errors } = parseDonationsExcel(req.file.buffer);
 
+            // Vigencia del proyecto (la presencia/formato de la fecha y el
+            // monto > 0 ya los valida el parser).
+            const validRows = [];
+            for (const row of parsed) {
+                const fecha = validate_movement_date(project, row.disbursement_date, "La fecha de ingreso");
+                if (fecha.error) {
+                    errors.push({ row: parsed.indexOf(row) + 2, message: fecha.error });
+                    continue;
+                }
+                validRows.push({ ...row, disbursement_date: fecha.value });
+            }
+
             const existingRows = await project_donations.findAll({ where: { project_id: projectId } });
             const existingIds = new Set(existingRows.map((r) => r.id));
+            // Sobre TODAS las filas del archivo, para no borrar registros cuyas
+            // filas fallaron validación.
             const excelIds = new Set(parsed.filter((r) => r.id).map((r) => r.id));
 
             let processed = 0;
@@ -1000,7 +1107,7 @@ router.post("/project/:projectId/excel/donations", verify_token, is_authenticate
             }
 
             // UPDATE and INSERT
-            for (const row of parsed) {
+            for (const row of validRows) {
                 try {
                     if (row.id && existingIds.has(row.id)) {
                         await project_donations.update(
@@ -1025,7 +1132,7 @@ router.post("/project/:projectId/excel/donations", verify_token, is_authenticate
                     }
                     processed++;
                 } catch (err) {
-                    errors.push({ row: parsed.indexOf(row) + 2, message: err.message });
+                    errors.push({ row: validRows.indexOf(row) + 2, message: err.message });
                 }
             }
 
@@ -1075,8 +1182,22 @@ router.post("/project/:projectId/excel/expenses", verify_token, is_authenticated
 
             const { parsed, errors } = parseExpensesExcel(req.file.buffer);
 
+            // Vigencia del proyecto (la presencia/formato de la fecha y el
+            // monto > 0 ya los valida el parser).
+            const validRows = [];
+            for (const row of parsed) {
+                const fecha = validate_movement_date(project, row.expense_date, "La fecha del gasto");
+                if (fecha.error) {
+                    errors.push({ row: parsed.indexOf(row) + 2, message: fecha.error });
+                    continue;
+                }
+                validRows.push({ ...row, expense_date: fecha.value });
+            }
+
             const existingRows = await project_expenses.findAll({ where: { project_id: projectId } });
             const existingIds = new Set(existingRows.map((r) => r.id));
+            // Sobre TODAS las filas del archivo, para no borrar registros cuyas
+            // filas fallaron validación.
             const excelIds = new Set(parsed.filter((r) => r.id).map((r) => r.id));
 
             let processed = 0;
@@ -1089,11 +1210,11 @@ router.post("/project/:projectId/excel/expenses", verify_token, is_authenticated
             }
 
             // UPDATE and INSERT
-            for (const row of parsed) {
+            for (const row of validRows) {
                 try {
                     if (row.id && existingIds.has(row.id)) {
                         await project_expenses.update(
-                            { amount: row.amount, description: row.description },
+                            { amount: row.amount, description: row.description, expense_date: row.expense_date, expense_category_id: row.expense_category_id ?? null },
                             { where: { id: row.id, project_id: projectId } }
                         );
                     } else {
@@ -1101,11 +1222,13 @@ router.post("/project/:projectId/excel/expenses", verify_token, is_authenticated
                             project_id: projectId,
                             amount: row.amount,
                             description: row.description,
+                            expense_date: row.expense_date,
+                            expense_category_id: row.expense_category_id ?? null,
                         });
                     }
                     processed++;
                 } catch (err) {
-                    errors.push({ row: parsed.indexOf(row) + 2, message: err.message });
+                    errors.push({ row: validRows.indexOf(row) + 2, message: err.message });
                 }
             }
 
@@ -1130,20 +1253,26 @@ router.post("/project/:projectId/financing-source", verify_token, is_authenticat
         try {
             const { projectId } = req.params;
             const { financing_source_id, amount, description, disbursement_date } = req.body ?? {};
-            if (!financing_source_id || (typeof amount !== "number" && typeof amount !== "string")) {
+            if (!financing_source_id) {
                 return res.status(400).json({ message: "Se requieren financing_source_id y amount" });
+            }
+            const cents = to_positive_cents(amount);
+            if (cents === null) {
+                return res.status(400).json({ message: "El monto debe ser un número mayor que 0" });
             }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
             if (!(await check_project_assignment(req, res, project))) return;
+            const fecha = validate_movement_date(project, disbursement_date, "La fecha de ingreso");
+            if (fecha.error) return res.status(400).json({ message: fecha.error });
             const srcExists = await financing_sources.findOne({ where: { id: financing_source_id } });
             if (!srcExists) return res.status(400).json({ message: "Fuente de financiamiento no encontrada" });
             const row = await project_financing_sources.create({
                 project_id: projectId,
                 financing_source_id,
-                amount: Math.round(Number(amount) * 100),
+                amount: cents,
                 description: (description ?? "").toString(),
-                disbursement_date: disbursement_date || null,
+                disbursement_date: fecha.value,
             });
             await project_logs.create({
                 user_id: req.user_id,
@@ -1163,21 +1292,27 @@ router.put("/project/:projectId/financing-source/:id", verify_token, is_authenti
         try {
             const { projectId, id } = req.params;
             const { financing_source_id, amount, description, disbursement_date } = req.body ?? {};
-            if (!financing_source_id || (typeof amount !== "number" && typeof amount !== "string")) {
+            if (!financing_source_id) {
                 return res.status(400).json({ message: "Se requieren financing_source_id y amount" });
+            }
+            const cents = to_positive_cents(amount);
+            if (cents === null) {
+                return res.status(400).json({ message: "El monto debe ser un número mayor que 0" });
             }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
             if (!(await check_project_assignment(req, res, project))) return;
+            const fecha = validate_movement_date(project, disbursement_date, "La fecha de ingreso");
+            if (fecha.error) return res.status(400).json({ message: fecha.error });
             const row = await project_financing_sources.findOne({ where: { id, project_id: projectId } });
             if (!row) return res.status(404).json({ message: "Fuente no encontrada" });
             const srcExists = await financing_sources.findOne({ where: { id: financing_source_id } });
             if (!srcExists) return res.status(400).json({ message: "Fuente de financiamiento no encontrada" });
             await row.update({
                 financing_source_id,
-                amount: Math.round(Number(amount) * 100),
+                amount: cents,
                 description: (description ?? "").toString(),
-                disbursement_date: disbursement_date || null,
+                disbursement_date: fecha.value,
             });
             await project_logs.create({
                 user_id: req.user_id,
@@ -1221,22 +1356,28 @@ router.post("/project/:projectId/donation", verify_token, is_authenticated,
             const { projectId } = req.params;
             const { amount, donation_type, description, donor_name, disbursement_date } = req.body ?? {};
             const VALID_TYPES = ["CASH", "SUPPLY", "BENEFIT"];
-            if ((typeof amount !== "number" && typeof amount !== "string") || !VALID_TYPES.includes(donation_type)) {
+            if (!VALID_TYPES.includes(donation_type)) {
                 return res.status(400).json({ message: "Se requieren amount y donation_type (CASH, SUPPLY o BENEFIT)" });
             }
             if (typeof donor_name !== "string" || donor_name.trim().length === 0) {
                 return res.status(400).json({ message: "El donante es obligatorio" });
             }
+            const cents = to_positive_cents(amount);
+            if (cents === null) {
+                return res.status(400).json({ message: "El monto debe ser un número mayor que 0" });
+            }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
             if (!(await check_project_assignment(req, res, project))) return;
+            const fecha = validate_movement_date(project, disbursement_date, "La fecha de ingreso");
+            if (fecha.error) return res.status(400).json({ message: fecha.error });
             const row = await project_donations.create({
                 project_id: projectId,
-                amount: Math.round(Number(amount) * 100),
+                amount: cents,
                 description: (description ?? "").toString(),
                 donor_name: donor_name.trim(),
                 donation_type,
-                disbursement_date: disbursement_date || null,
+                disbursement_date: fecha.value,
             });
             await project_logs.create({
                 user_id: req.user_id,
@@ -1257,23 +1398,29 @@ router.put("/project/:projectId/donation/:id", verify_token, is_authenticated,
             const { projectId, id } = req.params;
             const { amount, donation_type, description, donor_name, disbursement_date } = req.body ?? {};
             const VALID_TYPES = ["CASH", "SUPPLY", "BENEFIT"];
-            if ((typeof amount !== "number" && typeof amount !== "string") || !VALID_TYPES.includes(donation_type)) {
+            if (!VALID_TYPES.includes(donation_type)) {
                 return res.status(400).json({ message: "Se requieren amount y donation_type (CASH, SUPPLY o BENEFIT)" });
             }
             if (typeof donor_name !== "string" || donor_name.trim().length === 0) {
                 return res.status(400).json({ message: "El donante es obligatorio" });
             }
+            const cents = to_positive_cents(amount);
+            if (cents === null) {
+                return res.status(400).json({ message: "El monto debe ser un número mayor que 0" });
+            }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
             if (!(await check_project_assignment(req, res, project))) return;
+            const fecha = validate_movement_date(project, disbursement_date, "La fecha de ingreso");
+            if (fecha.error) return res.status(400).json({ message: fecha.error });
             const row = await project_donations.findOne({ where: { id, project_id: projectId } });
             if (!row) return res.status(404).json({ message: "Donación no encontrada" });
             await row.update({
-                amount: Math.round(Number(amount) * 100),
+                amount: cents,
                 description: (description ?? "").toString(),
                 donor_name: donor_name.trim(),
                 donation_type,
-                disbursement_date: disbursement_date || null,
+                disbursement_date: fecha.value,
             });
             await project_logs.create({
                 user_id: req.user_id,
@@ -1335,19 +1482,23 @@ router.post("/project/:projectId/expense", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId } = req.params;
-            const { amount, description, expense_category_id, origin_kind, origin_id } = req.body ?? {};
-            if (typeof amount !== "number" && typeof amount !== "string") {
-                return res.status(400).json({ message: "Se requiere amount" });
+            const { amount, description, expense_date, expense_category_id, origin_kind, origin_id } = req.body ?? {};
+            const cents = to_positive_cents(amount);
+            if (cents === null) {
+                return res.status(400).json({ message: "El monto debe ser un número mayor que 0" });
             }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
             if (!(await check_project_assignment(req, res, project))) return;
+            const fecha = validate_movement_date(project, expense_date, "La fecha del gasto");
+            if (fecha.error) return res.status(400).json({ message: fecha.error });
             const origin = await resolve_expense_origin(projectId, origin_kind, origin_id);
             if (!origin.ok) return res.status(400).json({ message: origin.message });
             const row = await project_expenses.create({
                 project_id: projectId,
-                amount: Math.round(Number(amount) * 100),
+                amount: cents,
                 description: (description ?? "").toString(),
+                expense_date: fecha.value,
                 expense_category_id: expense_category_id || null,
                 ...origin.cols,
             });
@@ -1368,20 +1519,24 @@ router.put("/project/:projectId/expense/:id", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const { projectId, id } = req.params;
-            const { amount, description, expense_category_id, origin_kind, origin_id } = req.body ?? {};
-            if (typeof amount !== "number" && typeof amount !== "string") {
-                return res.status(400).json({ message: "Se requiere amount" });
+            const { amount, description, expense_date, expense_category_id, origin_kind, origin_id } = req.body ?? {};
+            const cents = to_positive_cents(amount);
+            if (cents === null) {
+                return res.status(400).json({ message: "El monto debe ser un número mayor que 0" });
             }
             const project = await projects.findOne({ where: { id: projectId } });
             if (!project) return res.status(404).json({ message: "Proyecto no encontrado" });
             if (!(await check_project_assignment(req, res, project))) return;
+            const fecha = validate_movement_date(project, expense_date, "La fecha del gasto");
+            if (fecha.error) return res.status(400).json({ message: fecha.error });
             const row = await project_expenses.findOne({ where: { id, project_id: projectId } });
             if (!row) return res.status(404).json({ message: "Gasto no encontrado" });
             const origin = await resolve_expense_origin(projectId, origin_kind, origin_id);
             if (!origin.ok) return res.status(400).json({ message: origin.message });
             await row.update({
-                amount: Math.round(Number(amount) * 100),
+                amount: cents,
                 description: (description ?? "").toString(),
+                expense_date: fecha.value,
                 expense_category_id: expense_category_id || null,
                 ...origin.cols,
             });

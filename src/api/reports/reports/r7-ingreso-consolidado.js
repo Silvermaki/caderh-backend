@@ -4,15 +4,15 @@ import { reportHandler, centsToLmps } from '../shared.js';
 // Correcciones:
 //   1. Se excluyen proyectos eliminados (soft delete): antes las donaciones y
 //      fuentes de proyectos DELETED inflaban los totales.
-//   2. El trimestre se deriva de la fecha de ingreso (disbursement_date),
-//      con created_dt como respaldo — consistente con R6 (req 10).
+//   2. El trimestre se deriva de la fecha de ingreso (disbursement_date,
+//      NOT NULL desde la recaptura) — consistente con R6 (req 10).
 //   3. Gran total ya no doble-cuenta el efectivo: "donaciones" ahora agrupa
 //      solo especie/beneficio, y granTotal = efectivo + especie/beneficio.
 const SQL = `
   WITH donations AS (
     SELECT
-      EXTRACT(YEAR    FROM COALESCE(pd.disbursement_date, pd.created_dt))::int AS year,
-      EXTRACT(QUARTER FROM COALESCE(pd.disbursement_date, pd.created_dt))::int AS quarter,
+      EXTRACT(YEAR    FROM pd.disbursement_date)::int AS year,
+      EXTRACT(QUARTER FROM pd.disbursement_date)::int AS quarter,
       pd.donation_type                          AS don_type,
       pd.amount                                 AS amount_cents
     FROM caderh.project_donations pd
@@ -20,7 +20,7 @@ const SQL = `
   ),
   financing AS (
     SELECT
-      EXTRACT(YEAR FROM COALESCE(pfs.disbursement_date, pfs.created_dt))::int AS year,
+      EXTRACT(YEAR FROM pfs.disbursement_date)::int AS year,
       pfs.amount                                AS amount_cents
     FROM caderh.project_financing_sources pfs
     JOIN caderh.projects p ON p.id = pfs.project_id AND p.project_status <> 'DELETED'
@@ -52,23 +52,25 @@ const SQL = `
 // % de ejecución financiera del período (criterio CADERH): gastos ejecutados
 // en efectivo ÷ ingresos recibidos en efectivo × 100. La especie queda fuera.
 // Gasto en efectivo = no imputado a una donación en especie/beneficio.
+// Fechas de negocio: ingresos por disbursement_date y gastos por expense_date
+// (created_dt es solo la fecha técnica de captura).
 const CASH_EXECUTION_SQL = `
   SELECT
     (
       COALESCE((SELECT SUM(pfs.amount) FROM caderh.project_financing_sources pfs
         JOIN caderh.projects p ON p.id = pfs.project_id AND p.project_status <> 'DELETED'
-        WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM COALESCE(pfs.disbursement_date, pfs.created_dt)) = $1)), 0)
+        WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM pfs.disbursement_date) = $1)), 0)
       +
       COALESCE((SELECT SUM(pd.amount) FROM caderh.project_donations pd
         JOIN caderh.projects p ON p.id = pd.project_id AND p.project_status <> 'DELETED'
         WHERE pd.donation_type = 'CASH'
-          AND ($1::int IS NULL OR EXTRACT(YEAR FROM COALESCE(pd.disbursement_date, pd.created_dt)) = $1)), 0)
+          AND ($1::int IS NULL OR EXTRACT(YEAR FROM pd.disbursement_date) = $1)), 0)
     )::bigint AS ingresos_efectivo_cents,
     COALESCE((SELECT SUM(pe.amount) FROM caderh.project_expenses pe
       JOIN caderh.projects p ON p.id = pe.project_id AND p.project_status <> 'DELETED'
       LEFT JOIN caderh.project_donations pdo ON pdo.id = pe.project_donation_id
       WHERE (pe.project_donation_id IS NULL OR pdo.donation_type = 'CASH')
-        AND ($1::int IS NULL OR EXTRACT(YEAR FROM pe.created_dt) = $1)), 0)::bigint AS gastos_efectivo_cents
+        AND ($1::int IS NULL OR EXTRACT(YEAR FROM pe.expense_date) = $1)), 0)::bigint AS gastos_efectivo_cents
 `;
 
 export const handler = reportHandler(async (req) => {

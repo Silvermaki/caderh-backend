@@ -180,18 +180,24 @@ export function generateExpensesExcel(rows, options = {}) {
     const ws = wb.addWorksheet("Gastos");
     const hStyle = headerStyle(wb);
 
+    // "Fecha del Gasto" = fecha de negocio (obligatoria desde la migración
+    // 1772330000000). "Categoria ID" es opcional (UUID de expense_categories).
     const headers = includeId
-        ? ["ID", "Monto", "Descripcion"]
-        : ["Monto", "Descripcion"];
+        ? ["ID", "Monto", "Descripcion", "Fecha del Gasto", "Categoria ID"]
+        : ["Monto", "Descripcion", "Fecha del Gasto", "Categoria ID"];
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(hStyle));
 
     if (includeId) {
         ws.column(1).setWidth(38);
         ws.column(2).setWidth(18);
         ws.column(3).setWidth(30);
+        ws.column(4).setWidth(18);
+        ws.column(5).setWidth(38);
     } else {
         ws.column(1).setWidth(18);
         ws.column(2).setWidth(30);
+        ws.column(3).setWidth(18);
+        ws.column(4).setWidth(38);
     }
 
     rows.forEach((r, idx) => {
@@ -200,9 +206,13 @@ export function generateExpensesExcel(rows, options = {}) {
             ws.cell(row, 1).string(r.id ?? "");
             ws.cell(row, 2).number(Number(r.amount ?? 0) / 100);
             ws.cell(row, 3).string(r.description ?? "");
+            ws.cell(row, 4).string(formatDate(r.expense_date));
+            ws.cell(row, 5).string(r.expense_category_id ?? "");
         } else {
             ws.cell(row, 1).number(Number(r.amount ?? 0) / 100);
             ws.cell(row, 2).string(r.description ?? "");
+            ws.cell(row, 3).string(formatDate(r.expense_date));
+            ws.cell(row, 4).string(r.expense_category_id ?? "");
         }
     });
 
@@ -235,8 +245,14 @@ export function parseFinancingSourcesExcel(buffer) {
             errors.push({ row: rowNum, message: "Fuente ID no es un UUID válido" });
             return;
         }
-        if (isNaN(monto)) {
-            errors.push({ row: rowNum, message: "monto inválido" });
+        // Monto > 0 (CHECK de la migración 1772330000000).
+        if (isNaN(monto) || monto <= 0) {
+            errors.push({ row: rowNum, message: "Monto inválido: debe ser un número mayor que 0" });
+            return;
+        }
+        // Fecha de negocio obligatoria desde la migración 1772330000000.
+        if (!disbursement_date) {
+            errors.push({ row: rowNum, message: "Fecha de Ingreso es requerida (formato AAAA-MM-DD)" });
             return;
         }
         if (id && !UUID_RE.test(id)) {
@@ -280,12 +296,18 @@ export function parseDonationsExcel(buffer) {
             errors.push({ row: rowNum, message: "Donante es requerido" });
             return;
         }
-        if (isNaN(monto)) {
-            errors.push({ row: rowNum, message: "Monto inválido" });
+        // Monto > 0 (CHECK de la migración 1772330000000).
+        if (isNaN(monto) || monto <= 0) {
+            errors.push({ row: rowNum, message: "Monto inválido: debe ser un número mayor que 0" });
             return;
         }
         if (!donation_type) {
             errors.push({ row: rowNum, message: `Tipo inválido: "${row["Tipo"]}". Use EFECTIVO, SUMINISTROS o BENEFICIO` });
+            return;
+        }
+        // Fecha de negocio obligatoria desde la migración 1772330000000.
+        if (!disbursement_date) {
+            errors.push({ row: rowNum, message: "Fecha de Ingreso es requerida (formato AAAA-MM-DD)" });
             return;
         }
         if (id && !UUID_RE.test(id)) {
@@ -309,7 +331,7 @@ export function parseDonationsExcel(buffer) {
 // ─── PARSE: Expenses ────────────────────────────────────────────────────────
 
 export function parseExpensesExcel(buffer) {
-    const workbook = XLSX.read(buffer, { type: "buffer" });
+    const workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const jsonRows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
 
@@ -321,13 +343,25 @@ export function parseExpensesExcel(buffer) {
         const id = String(row["ID"] ?? "").trim();
         const monto = Number(row["Monto"]);
         const description = String(row["Descripcion"] ?? "").trim();
+        // Fecha de negocio del gasto (obligatoria desde la migración 1772330000000).
+        const expense_date = parseDate(row["Fecha del Gasto"] ?? row["Fecha"]);
+        const expense_category_id = String(row["Categoria ID"] ?? "").trim();
 
-        if (isNaN(monto)) {
-            errors.push({ row: rowNum, message: "Monto inválido" });
+        // Monto > 0 (CHECK de la migración 1772330000000).
+        if (isNaN(monto) || monto <= 0) {
+            errors.push({ row: rowNum, message: "Monto inválido: debe ser un número mayor que 0" });
+            return;
+        }
+        if (!expense_date) {
+            errors.push({ row: rowNum, message: "Fecha del Gasto es requerida (formato AAAA-MM-DD)" });
             return;
         }
         if (id && !UUID_RE.test(id)) {
             errors.push({ row: rowNum, message: "id no es un UUID válido" });
+            return;
+        }
+        if (expense_category_id && !UUID_RE.test(expense_category_id)) {
+            errors.push({ row: rowNum, message: "Categoria ID no es un UUID válido" });
             return;
         }
 
@@ -335,6 +369,8 @@ export function parseExpensesExcel(buffer) {
             id: id || null,
             amount: Math.round(monto * 100),
             description,
+            expense_date,
+            expense_category_id: expense_category_id || null,
         });
     });
 

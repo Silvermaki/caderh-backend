@@ -6,14 +6,14 @@ import { reportHandler } from '../shared.js';
 // Filtros: project, cftp (centro), financingSource (via project), technicalArea,
 // city (municipio), year, quarter (calendario), age range (min-max), gender.
 //
-// Schema notes:
+// Schema notes (post-recaptura):
 //   - centros.cursos NO tiene area_id; áreas vienen de centros.curso_areas (junction).
 //     Para evitar doble-conteo cuando un curso tiene varias áreas, agregamos las
 //     áreas como string con STRING_AGG en subquery.
-//   - centros.estudiantes.fecha_nacimiento es TEXT, no DATE; casteamos con guard.
-//     El guard exige años 19xx/20xx: la data SGC trae fechas con año 0000 (el cast a date revienta) y años 0021-0200 (edades absurdas).
-//   - centros.estudiantes.sexo es TEXT libre — normalizamos con CASE explícito
-//     (Masculino/M/Hombre vs Femenino/F/Mujer) en vez de LIKE 'M%' que rompe con "Mujer".
+//   - centros.estudiantes.fecha_nacimiento es DATE real (CHECK de rango en
+//     captura): la edad se calcula con AGE directo, sin guard de regex.
+//   - centros.estudiantes.sexo es canónico 'M'/'F' — el CASE explícito tolera
+//     además las variantes heredadas (Masculino/Hombre vs Femenino/Mujer).
 //   - año/trimestre se derivan de proc.fecha_inicial (DATE), no de created_at.
 
 const SQL = `
@@ -33,11 +33,7 @@ const SQL = `
          WHERE ca.curso_id = cu.id)       AS area_tecnica,
       EXTRACT(YEAR    FROM proc.fecha_inicial)::int  AS anio,
       EXTRACT(QUARTER FROM proc.fecha_inicial)::int  AS trimestre,
-      CASE
-        WHEN e.fecha_nacimiento ~ '^(19|20)\\d{2}-\\d{2}-\\d{2}'
-          THEN DATE_PART('year', AGE(proc.fecha_inicial, e.fecha_nacimiento::date))::int
-        ELSE NULL
-      END                                 AS edad,
+      DATE_PART('year', AGE(proc.fecha_inicial, e.fecha_nacimiento))::int AS edad,
       CASE
         WHEN UPPER(TRIM(COALESCE(e.sexo,''))) IN ('M', 'MASCULINO', 'HOMBRE') THEN 'M'
         WHEN UPPER(TRIM(COALESCE(e.sexo,''))) IN ('F', 'FEMENINO', 'MUJER')   THEN 'F'

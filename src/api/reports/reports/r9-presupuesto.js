@@ -2,6 +2,8 @@ import { sequelize } from '../../../utils/sequelize.js';
 import { reportHandler, centsToLmps } from '../shared.js';
 
 // R9: Presupuesto ejecutado vs programado por proyecto y rubro.
+// Año/trimestre por expense_date (fecha de negocio del gasto, NOT NULL desde
+// la recaptura; created_dt es solo la fecha técnica de captura).
 // Columnas "programado", "% ejecución" y "saldo" son missingInDb (no existe
 // tabla de presupuesto programado aún).
 
@@ -13,13 +15,13 @@ const SQL = `
       ec.id                                     AS rubro_id,
       ec.name                                   AS rubro_name,
       pe.amount                                 AS amount_cents,
-      EXTRACT(YEAR    FROM pe.created_dt)::int  AS year,
-      EXTRACT(QUARTER FROM pe.created_dt)::int  AS quarter
+      EXTRACT(YEAR    FROM pe.expense_date)::int  AS year,
+      EXTRACT(QUARTER FROM pe.expense_date)::int  AS quarter
     FROM caderh.projects p
     LEFT JOIN caderh.project_expenses pe   ON pe.project_id = p.id
     LEFT JOIN caderh.expense_categories ec ON ec.id = pe.expense_category_id
     WHERE ($1::uuid[] IS NULL OR p.id = ANY($1::uuid[]))
-      AND ($2::int IS NULL OR EXTRACT(YEAR FROM pe.created_dt)::int = $2)
+      AND ($2::int IS NULL OR EXTRACT(YEAR FROM pe.expense_date)::int = $2)
   )
   SELECT
     project_id, project_name, rubro_id, rubro_name,

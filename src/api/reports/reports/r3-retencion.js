@@ -6,18 +6,19 @@ import { reportHandler } from '../shared.js';
 // Filtros: idem R1 (project, cftp, financingSource, technicalArea, city,
 // year, quarter calendario, age range, gender).
 //
-// Bug fixes vs versión anterior:
-//   1. centros.egresados NO tiene proceso_id. El JOIN anterior unía por
-//      estudiante_id solamente, duplicando el egreso en cada (centro, curso)
-//      donde el estudiante estuvo matriculado. Fix: cada estudiante con
-//      registro en egresados se atribuye a UN solo proceso — el más reciente
-//      en el que se matriculó (DISTINCT ON pm.estudiante_id ORDER BY fecha_inicial DESC).
+// Reglas (esquema post-recaptura):
+//   1. Atribución EXACTA del egreso: egresados.proceso_matricula_id (FK UNIQUE
+//      a la matrícula) → proceso_matriculas → proceso_id. Ya no se usa la
+//      heurística "proceso más reciente por estudiante"; la atribución deja
+//      de ser aproximada.
 //   2. inicial NO se filtra por pm.estatus=1; queremos todos los matriculados
 //      históricamente para que el ratio final/inicial refleje retención real.
-//   3. Género: CASE explícito (Masculino/M/Hombre vs Femenino/F/Mujer) en vez
-//      de LIKE 'M%' que cuenta "Mujer" como hombre.
+//   3. Género: CASE explícito sobre el canónico 'M'/'F' (tolera variantes
+//      heredadas Masculino/Hombre/Femenino/Mujer) en vez de LIKE 'M%'.
 //   4. Deserción reportada via egresados.deserto IS NOT NULL (registro directo)
 //      en vez de inicial − final que puede ser negativo si hay anomalías.
+//   5. fecha_nacimiento ya es DATE real (con CHECK de rango en captura):
+//      la edad se calcula con AGE directo, sin guard de regex.
 
 const SQL = `
   WITH base AS (
@@ -38,11 +39,7 @@ const SQL = `
          WHERE ca.curso_id = cu.id)       AS area_tecnica,
       EXTRACT(YEAR    FROM proc.fecha_inicial)::int  AS anio,
       EXTRACT(QUARTER FROM proc.fecha_inicial)::int  AS trimestre,
-      CASE
-        WHEN e.fecha_nacimiento ~ '^(19|20)\\d{2}-\\d{2}-\\d{2}'
-          THEN DATE_PART('year', AGE(proc.fecha_inicial, e.fecha_nacimiento::date))::int
-        ELSE NULL
-      END                                 AS edad,
+      DATE_PART('year', AGE(proc.fecha_inicial, e.fecha_nacimiento))::int AS edad,
       CASE
         WHEN UPPER(TRIM(COALESCE(e.sexo,''))) IN ('M','MASCULINO','HOMBRE') THEN 'M'
         WHEN UPPER(TRIM(COALESCE(e.sexo,''))) IN ('F','FEMENINO','MUJER')   THEN 'F'
@@ -86,18 +83,17 @@ const SQL = `
     WHERE ($8::int IS NULL OR edad >= $8)
       AND ($9::int IS NULL OR edad <= $9)
   ),
-  -- Cada estudiante con egreso se atribuye a UN proceso (el más reciente).
+  -- Egreso atado a su matrícula exacta: proceso_matricula_id es FK UNIQUE a
+  -- proceso_matriculas, de donde salen estudiante y proceso sin ambigüedad.
   egreso_proceso AS (
-    SELECT DISTINCT ON (eg.estudiante_id)
-      eg.estudiante_id,
+    SELECT
+      pm.estudiante_id,
       pm.proceso_id,
       eg.final     AS final_date,
       eg.deserto   AS deserto_date,
       eg.tipo_egreso
     FROM centros.egresados eg
-    JOIN centros.proceso_matriculas pm ON pm.estudiante_id = eg.estudiante_id
-    JOIN centros.procesos proc         ON proc.id = pm.proceso_id
-    ORDER BY eg.estudiante_id, proc.fecha_inicial DESC NULLS LAST
+    JOIN centros.proceso_matriculas pm ON pm.id = eg.proceso_matricula_id
   )
   SELECT
     b.project_name,

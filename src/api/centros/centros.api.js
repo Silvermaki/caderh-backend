@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { sequelize, user_logs, sgc_areas, sgc_departamentos, sgc_municipios, sgc_centros, sgc_instructors, sgc_estudiantes, sgc_cursos, sgc_nivel_escolaridads, sgc_curso_modulos, sgc_procesos, sgc_proceso_matriculas, sgc_metodologias, sgc_tipo_jornadas, projects_processes, projects } from "../../utils/sequelize.js";
+import { sequelize, user_logs, sgc_areas, sgc_departamentos, sgc_municipios, sgc_centros, sgc_instructors, sgc_estudiantes, sgc_cursos, sgc_nivel_escolaridads, sgc_discapacidads, sgc_etnias, sgc_curso_modulos, sgc_procesos, sgc_proceso_matriculas, sgc_metodologias, sgc_tipo_jornadas, projects_processes, projects } from "../../utils/sequelize.js";
 import { verify_token, is_supervisor, is_authenticated } from "../../utils/token.js";
 import { Op } from "sequelize";
 import { instructorFileUpload, buildInstructorFilePath, studentFileUpload, buildStudentFilePath } from "../../utils/upload.js";
@@ -16,6 +16,7 @@ import {
     validateMunicipioDepartamento,
 } from "../../utils/excel-centros.js";
 import { generateCentrosConsolidadoPdf } from "../../utils/pdf-centros.js";
+import { buildStudentPayload, normalizeDuracionHoras, normalizeDias, normalizeProcessDates } from "../../utils/normalize-captura.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -481,11 +482,26 @@ router.post("/centros/wizard", verify_token, is_supervisor,
                 }
             }
 
-            // 5. Create students
+            // 5. Create students (normalización centralizada post-recaptura)
             const students = Array.isArray(b.students) ? b.students : [];
-            // Check duplicate identidades within batch
-            const batchIdentidades = students.map(s => s.identidad?.trim()).filter(Boolean);
-            const duplicatesInBatch = batchIdentidades.filter((id, idx) => batchIdentidades.indexOf(id) !== idx);
+            const studentItems = [];
+            for (const s of students) {
+                const { payload, errors: studentErrors } = buildStudentPayload(s);
+                const etiqueta = payload.identidad || (s.identidad ? String(s.identidad).trim() : "sin identidad");
+                if (!payload.nombres || !payload.apellidos || !payload.departamento_id || !payload.municipio_id || !payload.numero_dep) {
+                    errors.push(`Estudiante "${etiqueta}": faltan campos requeridos`);
+                    continue;
+                }
+                if (studentErrors.length > 0) {
+                    errors.push(`Estudiante "${etiqueta}": ${studentErrors.join("; ")}`);
+                    continue;
+                }
+                studentItems.push(payload);
+            }
+
+            // Check duplicate identidades within batch (formato canónico)
+            const batchIdentidades = studentItems.map((p) => p.identidad);
+            const duplicatesInBatch = new Set(batchIdentidades.filter((id, idx) => batchIdentidades.indexOf(id) !== idx));
 
             // Check existing identidades in DB
             let existingIdentidades = new Set();
@@ -499,30 +515,25 @@ router.post("/centros/wizard", verify_token, is_supervisor,
                 existingIdentidades = new Set(existing.map(e => e.identidad));
             }
 
-            for (const s of students) {
+            for (const payload of studentItems) {
                 try {
-                    const identidad = s.identidad?.trim();
-                    if (!identidad || !s.nombres?.trim() || !s.apellidos?.trim() || !s.sexo || !s.departamento_id || !s.municipio_id || !s.vive || s.numero_dep == null) {
-                        errors.push(`Estudiante "${identidad || "sin identidad"}": faltan campos requeridos`);
+                    if (duplicatesInBatch.has(payload.identidad)) {
+                        errors.push(`Estudiante "${payload.identidad}": identidad duplicada en el archivo`);
                         continue;
                     }
-                    if (duplicatesInBatch.includes(identidad)) {
-                        errors.push(`Estudiante "${identidad}": identidad duplicada en el archivo`);
-                        continue;
-                    }
-                    if (existingIdentidades.has(identidad)) {
-                        errors.push(`Estudiante "${identidad}": ya existe en el sistema`);
+                    if (existingIdentidades.has(payload.identidad)) {
+                        errors.push(`Estudiante "${payload.identidad}": ya existe en el sistema`);
                         continue;
                     }
                     await sgc_estudiantes.create({
                         centro_id: centroId,
                         estatus: 1,
-                        ...buildStudentBody(s),
+                        ...payload,
                     }, { transaction: t });
-                    existingIdentidades.add(identidad);
+                    existingIdentidades.add(payload.identidad);
                     studentsCreated++;
                 } catch (err) {
-                    errors.push(`Estudiante "${s.identidad}": ${err.message}`);
+                    errors.push(`Estudiante "${payload.identidad}": ${err.message}`);
                 }
             }
 
@@ -593,6 +604,38 @@ router.get("/nivel-escolaridades", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
             const rows = await sgc_nivel_escolaridads.findAll({
+                where: { estatus: 1 },
+                attributes: ["id", "nombre"],
+                order: [["nombre", "ASC"]],
+            });
+            res.status(200).json({ data: rows });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+// Catálogos de discapacidades y etnias (FKs enteras de estudiantes desde la
+// migración 1772310000000; antes eran TEXT con JSON escapado sin catálogo expuesto).
+router.get("/discapacidades", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const rows = await sgc_discapacidads.findAll({
+                where: { estatus: 1 },
+                attributes: ["id", "nombre"],
+                order: [["nombre", "ASC"]],
+            });
+            res.status(200).json({ data: rows });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.get("/etnias", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const rows = await sgc_etnias.findAll({
                 where: { estatus: 1 },
                 attributes: ["id", "nombre"],
                 order: [["nombre", "ASC"]],
@@ -985,35 +1028,16 @@ router.post("/centros/:centroId/estudiantes", verify_token, is_supervisor,
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
-            const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: b.identidad.trim(), estatus: 1 } });
+            const { payload, errors: validationErrors } = buildStudentPayload(b);
+            if (validationErrors.length > 0) {
+                return res.status(400).json({ message: validationErrors.join(". ") });
+            }
+
+            const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: payload.identidad, estatus: 1 } });
             if (existingByIdentidad) return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
 
             const estudiante = await sgc_estudiantes.create({
-                centro_id: centroId, identidad: b.identidad.trim(), nombres: b.nombres.trim(), apellidos: b.apellidos.trim(),
-                departamento_id: b.departamento_id, municipio_id: b.municipio_id,
-                email: b.email?.trim() || null, telefono: b.telefono?.trim() || null, celular: b.celular?.trim() || null,
-                sexo: b.sexo, estado_civil: b.estado_civil, fecha_nacimiento: b.fecha_nacimiento || null,
-                vive: b.vive, numero_dep: b.numero_dep, direccion: b.direccion?.trim() || null,
-                facebook: b.facebook?.trim() || null, twitter: b.twitter?.trim() || null, instagram: b.instagram?.trim() || null,
-                estudia: b.estudia ?? 0, nivel_escolaridad_id: b.nivel_escolaridad_id || null,
-                tiene_hijos: b.tiene_hijos ?? 0, cuantos_hijos: b.cuantos_hijos ?? 0,
-                vivienda: b.vivienda?.trim() || null, cantidad_viven: b.cantidad_viven ?? 0,
-                cantidad_trabajan_viven: b.cantidad_trabajan_viven ?? 0, cantidad_notrabajan_viven: b.cantidad_notrabajan_viven ?? 0,
-                ingreso_promedio: b.ingreso_promedio ?? 0,
-                trabajo_actual: b.trabajo_actual ?? 0, donde_trabaja: b.donde_trabaja?.trim() || null, puesto: b.puesto?.trim() || null,
-                trabajado_ant: b.trabajado_ant ?? 0, tiempo_ant: b.tiempo_ant?.trim() || null,
-                tipo_contrato_ant: b.tipo_contrato_ant ?? null, beneficios_empleo: b.beneficios_empleo?.trim() || null,
-                beneficios_empleo_otro: b.beneficios_empleo_otro?.trim() || null,
-                autoempleo: b.autoempleo ?? 0, autoempleo_dedicacion: b.autoempleo_dedicacion?.trim() || null,
-                autoempleo_otro: b.autoempleo_otro?.trim() || null, autoempleo_tiempo: b.autoempleo_tiempo?.trim() || null,
-                dias_semana_trabajo: b.dias_semana_trabajo?.trim() || null, horas_dia_trabajo: b.horas_dia_trabajo?.trim() || null,
-                socios: b.socios ?? 0, socios_cantidad: b.socios_cantidad ?? 0,
-                especial: b.especial ?? 0, discapacidad_id: b.discapacidad_id || null,
-                riesgo_social: b.riesgo_social ?? 0, etnia_id: b.etnia_id || null, interno: b.interno ?? 0,
-                nombre_r: b.nombre_r?.trim() || null, telefono_r: b.telefono_r?.trim() || null,
-                datos_r: b.datos_r?.trim() || null, parentesco_r: b.parentesco_r?.trim() || null,
-                adicional_r: b.adicional_r?.trim() || null,
-                estatus: 1,
+                centro_id: centroId, estatus: 1, ...payload,
             });
 
             await user_logs.create({ user_id: req.user_id, log: `Creó estudiante ID: ${estudiante.id}, CENTRO: ${centroId}` });
@@ -1037,38 +1061,18 @@ router.put("/centros/:centroId/estudiantes", verify_token, is_supervisor,
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
+            const { payload, errors: validationErrors } = buildStudentPayload(b);
+            if (validationErrors.length > 0) {
+                return res.status(400).json({ message: validationErrors.join(". ") });
+            }
+
             const estudiante = await sgc_estudiantes.findOne({ where: { id: b.id, centro_id: centroId } });
             if (!estudiante) return res.status(404).json({ message: "Estudiante no encontrado" });
 
-            const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: b.identidad.trim(), estatus: 1, id: { [Op.ne]: b.id } } });
+            const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: payload.identidad, estatus: 1, id: { [Op.ne]: b.id } } });
             if (existingByIdentidad) return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
 
-            await sgc_estudiantes.update({
-                identidad: b.identidad.trim(), nombres: b.nombres.trim(), apellidos: b.apellidos.trim(),
-                departamento_id: b.departamento_id, municipio_id: b.municipio_id,
-                email: b.email?.trim() || null, telefono: b.telefono?.trim() || null, celular: b.celular?.trim() || null,
-                sexo: b.sexo, estado_civil: b.estado_civil, fecha_nacimiento: b.fecha_nacimiento || null,
-                vive: b.vive, numero_dep: b.numero_dep, direccion: b.direccion?.trim() || null,
-                facebook: b.facebook?.trim() || null, twitter: b.twitter?.trim() || null, instagram: b.instagram?.trim() || null,
-                estudia: b.estudia ?? 0, nivel_escolaridad_id: b.nivel_escolaridad_id || null,
-                tiene_hijos: b.tiene_hijos ?? 0, cuantos_hijos: b.cuantos_hijos ?? 0,
-                vivienda: b.vivienda?.trim() || null, cantidad_viven: b.cantidad_viven ?? 0,
-                cantidad_trabajan_viven: b.cantidad_trabajan_viven ?? 0, cantidad_notrabajan_viven: b.cantidad_notrabajan_viven ?? 0,
-                ingreso_promedio: b.ingreso_promedio ?? 0,
-                trabajo_actual: b.trabajo_actual ?? 0, donde_trabaja: b.donde_trabaja?.trim() || null, puesto: b.puesto?.trim() || null,
-                trabajado_ant: b.trabajado_ant ?? 0, tiempo_ant: b.tiempo_ant?.trim() || null,
-                tipo_contrato_ant: b.tipo_contrato_ant ?? null, beneficios_empleo: b.beneficios_empleo?.trim() || null,
-                beneficios_empleo_otro: b.beneficios_empleo_otro?.trim() || null,
-                autoempleo: b.autoempleo ?? 0, autoempleo_dedicacion: b.autoempleo_dedicacion?.trim() || null,
-                autoempleo_otro: b.autoempleo_otro?.trim() || null, autoempleo_tiempo: b.autoempleo_tiempo?.trim() || null,
-                dias_semana_trabajo: b.dias_semana_trabajo?.trim() || null, horas_dia_trabajo: b.horas_dia_trabajo?.trim() || null,
-                socios: b.socios ?? 0, socios_cantidad: b.socios_cantidad ?? 0,
-                especial: b.especial ?? 0, discapacidad_id: b.discapacidad_id || null,
-                riesgo_social: b.riesgo_social ?? 0, etnia_id: b.etnia_id || null, interno: b.interno ?? 0,
-                nombre_r: b.nombre_r?.trim() || null, telefono_r: b.telefono_r?.trim() || null,
-                datos_r: b.datos_r?.trim() || null, parentesco_r: b.parentesco_r?.trim() || null,
-                adicional_r: b.adicional_r?.trim() || null,
-            }, { where: { id: b.id, centro_id: centroId } });
+            await sgc_estudiantes.update(payload, { where: { id: b.id, centro_id: centroId } });
 
             await user_logs.create({ user_id: req.user_id, log: `Actualizó estudiante ID: ${b.id}, CENTRO: ${centroId}` });
             res.status(200).json({ ok: true });
@@ -1220,34 +1224,9 @@ const STUDENT_ALL_FIELDS = [
     "dias_semana_trabajo", "horas_dia_trabajo", "socios", "socios_cantidad",
 ];
 
-function buildStudentBody(b) {
-    return {
-        identidad: b.identidad?.trim(), nombres: b.nombres?.trim(), apellidos: b.apellidos?.trim(),
-        departamento_id: b.departamento_id, municipio_id: b.municipio_id,
-        email: b.email?.trim() || null, telefono: b.telefono?.trim() || null, celular: b.celular?.trim() || null,
-        sexo: b.sexo, estado_civil: b.estado_civil, fecha_nacimiento: b.fecha_nacimiento || null,
-        vive: b.vive, numero_dep: b.numero_dep, direccion: b.direccion?.trim() || null,
-        facebook: b.facebook?.trim() || null, twitter: b.twitter?.trim() || null, instagram: b.instagram?.trim() || null,
-        estudia: b.estudia ?? 0, nivel_escolaridad_id: b.nivel_escolaridad_id || null,
-        tiene_hijos: b.tiene_hijos ?? 0, cuantos_hijos: b.cuantos_hijos ?? 0,
-        vivienda: b.vivienda?.trim() || null, cantidad_viven: b.cantidad_viven ?? 0,
-        cantidad_trabajan_viven: b.cantidad_trabajan_viven ?? 0, cantidad_notrabajan_viven: b.cantidad_notrabajan_viven ?? 0,
-        ingreso_promedio: b.ingreso_promedio ?? 0,
-        trabajo_actual: b.trabajo_actual ?? 0, donde_trabaja: b.donde_trabaja?.trim() || null, puesto: b.puesto?.trim() || null,
-        trabajado_ant: b.trabajado_ant ?? 0, tiempo_ant: b.tiempo_ant?.trim() || null,
-        tipo_contrato_ant: b.tipo_contrato_ant ?? null, beneficios_empleo: b.beneficios_empleo?.trim() || null,
-        beneficios_empleo_otro: b.beneficios_empleo_otro?.trim() || null,
-        autoempleo: b.autoempleo ?? 0, autoempleo_dedicacion: b.autoempleo_dedicacion?.trim() || null,
-        autoempleo_otro: b.autoempleo_otro?.trim() || null, autoempleo_tiempo: b.autoempleo_tiempo?.trim() || null,
-        dias_semana_trabajo: b.dias_semana_trabajo?.trim() || null, horas_dia_trabajo: b.horas_dia_trabajo?.trim() || null,
-        socios: b.socios ?? 0, socios_cantidad: b.socios_cantidad ?? 0,
-        especial: b.especial ?? 0, discapacidad_id: b.discapacidad_id || null,
-        riesgo_social: b.riesgo_social ?? 0, etnia_id: b.etnia_id || null, interno: b.interno ?? 0,
-        nombre_r: b.nombre_r?.trim() || null, telefono_r: b.telefono_r?.trim() || null,
-        datos_r: b.datos_r?.trim() || null, parentesco_r: b.parentesco_r?.trim() || null,
-        adicional_r: b.adicional_r?.trim() || null,
-    };
-}
+// La construcción/normalización del payload de estudiante vive en
+// buildStudentPayload (src/utils/normalize-captura.js): ÚNICA definición usada
+// por las rutas JSON, el wizard de centros y el import Excel.
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -1257,7 +1236,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // - area_id: área técnica vía junction curso_areas del curso del proceso.
 // - fuente_id: fuente de financiamiento (caderh.financing_sources, UUID) vía los
 //   proyectos vinculados al proceso (projects_processes → project_financing_sources);
-//   procesos.fuente_financiamiento_id es un entero legado sin catálogo migrado.
+//   es el único vínculo posible (procesos.fuente_financiamiento_id fue eliminada
+//   por la migración 1772320000000).
 function buildStudentsListWhere({ search, centro_id, curso_id, area_id, fuente_id }) {
     const enrollmentFilters = [];
     if (curso_id && Number.isInteger(Number(curso_id))) {
@@ -1376,7 +1356,10 @@ router.get("/students/:id", verify_token, is_authenticated,
                     [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "estudiantes".centro_id)`), "centro_nombre"],
                     [sequelize.literal(`(SELECT d.nombre FROM centros.departamentos d WHERE d.id = "estudiantes".departamento_id)`), "departamento_nombre"],
                     [sequelize.literal(`(SELECT m.nombre FROM centros.municipios m WHERE m.id = "estudiantes".municipio_id)`), "municipio_nombre"],
-                    [sequelize.literal(`(SELECT n.nombre FROM centros.nivel_escolaridads n WHERE n.id::text = "estudiantes".nivel_escolaridad_id)`), "nivel_escolaridad_nombre"],
+                    // FKs enteras desde la migración 1772310000000 (antes TEXT: se comparaba con ::text)
+                    [sequelize.literal(`(SELECT n.nombre FROM centros.nivel_escolaridads n WHERE n.id = "estudiantes".nivel_escolaridad_id)`), "nivel_escolaridad_nombre"],
+                    [sequelize.literal(`(SELECT d2.nombre FROM centros.discapacidads d2 WHERE d2.id = "estudiantes".discapacidad_id)`), "discapacidad_nombre"],
+                    [sequelize.literal(`(SELECT et.nombre FROM centros.etnias et WHERE et.id = "estudiantes".etnia_id)`), "etnia_nombre"],
                 ],
             });
             if (!student) return res.status(404).json({ message: "Estudiante no encontrado" });
@@ -1395,14 +1378,19 @@ router.post("/students", verify_token, is_supervisor,
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
+            const { payload, errors: validationErrors } = buildStudentPayload(b);
+            if (validationErrors.length > 0) {
+                return res.status(400).json({ message: validationErrors.join(". ") });
+            }
+
             const centro = await sgc_centros.findOne({ where: { id: b.centro_id } });
             if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
 
-            const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: b.identidad.trim(), estatus: 1 } });
+            const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: payload.identidad, estatus: 1 } });
             if (existingByIdentidad) return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
 
             const student = await sgc_estudiantes.create({
-                centro_id: b.centro_id, estatus: 1, ...buildStudentBody(b),
+                centro_id: b.centro_id, estatus: 1, ...payload,
             });
 
             await user_logs.create({ user_id: req.user_id, log: `Creó estudiante ID: ${student.id}, CENTRO: ${b.centro_id}` });
@@ -1424,13 +1412,18 @@ router.put("/students", verify_token, is_supervisor,
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
 
+            const { payload, errors: validationErrors } = buildStudentPayload(b);
+            if (validationErrors.length > 0) {
+                return res.status(400).json({ message: validationErrors.join(". ") });
+            }
+
             const student = await sgc_estudiantes.findOne({ where: { id: b.id, estatus: 1 } });
             if (!student) return res.status(404).json({ message: "Estudiante no encontrado" });
 
-            const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: b.identidad.trim(), estatus: 1, id: { [Op.ne]: b.id } } });
+            const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: payload.identidad, estatus: 1, id: { [Op.ne]: b.id } } });
             if (existingByIdentidad) return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
 
-            await sgc_estudiantes.update(buildStudentBody(b), { where: { id: b.id } });
+            await sgc_estudiantes.update(payload, { where: { id: b.id } });
 
             await user_logs.create({ user_id: req.user_id, log: `Actualizó estudiante ID: ${b.id}` });
             res.status(200).json({ ok: true });
@@ -1580,9 +1573,9 @@ router.get("/students/:studentId/enrollments", verify_token, is_authenticated,
                         FROM centros.curso_areas ca
                         JOIN centros.areas a ON a.id = ca.area_id
                         WHERE ca.curso_id = p.curso_id) AS area_nombre,
-                       -- Fuente de financiamiento: procesos.fuente_financiamiento_id es un entero
-                       -- legado sin catálogo migrado, así que el nombre se resuelve vía los
-                       -- proyectos vinculados al proceso (caderh.financing_sources).
+                       -- Fuente de financiamiento: se resuelve vía los proyectos vinculados al
+                       -- proceso (caderh.financing_sources); procesos.fuente_financiamiento_id
+                       -- fue eliminada por la migración 1772320000000.
                        (SELECT string_agg(DISTINCT fs.name, ', ')
                         FROM caderh.projects_processes pp
                         JOIN caderh.project_financing_sources pfs ON pfs.project_id = pp.project_id
@@ -2099,8 +2092,8 @@ router.get("/processes/:id", verify_token, is_authenticated,
                     [sequelize.literal(`(SELECT CONCAT(i.nombres, ' ', i.apellidos) FROM centros.instructors i WHERE i.id = "procesos".instructor_id)`), "instructor_nombre"],
                     [sequelize.literal(`(SELECT m.nombre FROM centros.metodologias m WHERE m.id = "procesos".metodologia_id)`), "metodologia_nombre"],
                     [sequelize.literal(`(SELECT tj.nombre FROM centros.tipo_jornadas tj WHERE tj.id = "procesos".tipo_jornada_id)`), "tipo_jornada_nombre"],
-                    // Fuente de financiamiento: procesos.fuente_financiamiento_id es un entero legado
-                    // sin catálogo migrado; el nombre se resuelve vía los proyectos vinculados.
+                    // Fuente de financiamiento: se resuelve vía los proyectos vinculados
+                    // (procesos.fuente_financiamiento_id fue eliminada por la migración 1772320000000).
                     [sequelize.literal(`(SELECT string_agg(DISTINCT fs.name, ', ')
                         FROM caderh.projects_processes pp
                         JOIN caderh.project_financing_sources pfs ON pfs.project_id = pp.project_id
@@ -2129,10 +2122,19 @@ router.post("/processes", verify_token, is_supervisor,
         try {
             const b = req.body;
             if (!b.centro_id || !b.codigo || !b.nombre || !b.instructor_id || !b.curso_id ||
-                !b.metodologia_id || !b.fecha_inicial || !b.fecha_final || !b.duracion_horas ||
-                !b.tipo_jornada_id || !b.horario || !b.dias) {
+                !b.metodologia_id || !b.tipo_jornada_id || !b.horario) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
+
+            // Normalización post-recaptura (migración 1772320000000):
+            // duracion_horas INTEGER > 0, fecha_final >= fecha_inicial y
+            // dias en JSON canónico ["1".."7"].
+            const duracion = normalizeDuracionHoras(b.duracion_horas);
+            if (duracion.error) return res.status(400).json({ message: duracion.error });
+            const fechas = normalizeProcessDates(b.fecha_inicial, b.fecha_final);
+            if (fechas.error) return res.status(400).json({ message: fechas.error });
+            const dias = normalizeDias(b.dias);
+            if (dias.error) return res.status(400).json({ message: dias.error });
 
             const centro = await sgc_centros.findOne({ where: { id: b.centro_id } });
             if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
@@ -2145,12 +2147,12 @@ router.post("/processes", verify_token, is_supervisor,
                 curso_id: Number(b.curso_id),
                 metodologia_id: Number(b.metodologia_id),
                 otra_metodologia: b.otra_metodologia?.trim() || null,
-                fecha_inicial: b.fecha_inicial,
-                fecha_final: b.fecha_final,
-                duracion_horas: b.duracion_horas.toString().trim(),
+                fecha_inicial: fechas.value.fecha_inicial,
+                fecha_final: fechas.value.fecha_final,
+                duracion_horas: duracion.value,
                 tipo_jornada_id: Number(b.tipo_jornada_id),
                 horario: b.horario.trim(),
-                dias: b.dias.trim(),
+                dias: dias.value,
                 sede: b.sede ?? 0,
                 lugar: b.lugar?.trim() || null,
                 estatus: 1,
@@ -2169,10 +2171,17 @@ router.put("/processes", verify_token, is_supervisor,
         try {
             const b = req.body;
             if (!b.id || !b.codigo || !b.nombre || !b.instructor_id || !b.curso_id ||
-                !b.metodologia_id || !b.fecha_inicial || !b.fecha_final || !b.duracion_horas ||
-                !b.tipo_jornada_id || !b.horario || !b.dias) {
+                !b.metodologia_id || !b.tipo_jornada_id || !b.horario) {
                 return res.status(400).json({ message: "Faltan campos requeridos" });
             }
+
+            // Normalización post-recaptura (migración 1772320000000).
+            const duracion = normalizeDuracionHoras(b.duracion_horas);
+            if (duracion.error) return res.status(400).json({ message: duracion.error });
+            const fechas = normalizeProcessDates(b.fecha_inicial, b.fecha_final);
+            if (fechas.error) return res.status(400).json({ message: fechas.error });
+            const dias = normalizeDias(b.dias);
+            if (dias.error) return res.status(400).json({ message: dias.error });
 
             const process = await sgc_procesos.findOne({ where: { id: b.id, estatus: 1 } });
             if (!process) return res.status(404).json({ message: "Proceso no encontrado" });
@@ -2184,12 +2193,12 @@ router.put("/processes", verify_token, is_supervisor,
                 curso_id: Number(b.curso_id),
                 metodologia_id: Number(b.metodologia_id),
                 otra_metodologia: b.otra_metodologia?.trim() || null,
-                fecha_inicial: b.fecha_inicial,
-                fecha_final: b.fecha_final,
-                duracion_horas: b.duracion_horas.toString().trim(),
+                fecha_inicial: fechas.value.fecha_inicial,
+                fecha_final: fechas.value.fecha_final,
+                duracion_horas: duracion.value,
                 tipo_jornada_id: Number(b.tipo_jornada_id),
                 horario: b.horario.trim(),
-                dias: b.dias.trim(),
+                dias: dias.value,
                 sede: b.sede ?? 0,
                 lugar: b.lugar?.trim() || null,
                 // Estatus de cancelación explícito (solo si viene en el body)
@@ -2255,29 +2264,52 @@ router.post("/processes/:id/enrollments", verify_token, is_supervisor,
             const process = await sgc_procesos.findOne({ where: { id: processId, estatus: 1 } });
             if (!process) return res.status(404).json({ message: "Proceso no encontrado" });
 
+            // UNIQUE (proceso_id, estudiante_id) desde la migración 1772320000000:
+            // la fila existe aunque la matrícula haya sido anulada/retirada
+            // (estatus 0/2), así que hay que REACTIVAR en vez de re-insertar.
+            const requestedIds = [...new Set(student_ids.map(Number))];
             const existing = await sgc_proceso_matriculas.findAll({
-                where: { proceso_id: processId, estudiante_id: { [Op.in]: student_ids.map(Number) }, estatus: 1 },
-                attributes: ["estudiante_id"],
+                where: { proceso_id: processId, estudiante_id: { [Op.in]: requestedIds } },
+                attributes: ["id", "estudiante_id", "estatus"],
+                raw: true,
             });
-            const existingIds = existing.map(e => e.estudiante_id);
-            const newIds = student_ids.map(Number).filter(id => !existingIds.includes(id));
+            const activeIds = new Set(existing.filter((e) => e.estatus === 1).map((e) => e.estudiante_id));
+            const inactiveIds = new Set(existing.filter((e) => e.estatus !== 1).map((e) => e.estudiante_id));
+
+            const newIds = [];
+            const reactivateIds = [];
+            for (const sid of requestedIds) {
+                if (activeIds.has(sid)) continue; // ya matriculado: skip silencioso (patrón del endpoint)
+                if (inactiveIds.has(sid)) reactivateIds.push(sid);
+                else newIds.push(sid);
+            }
 
             if (newIds.length > 0) {
+                // ignoreDuplicates (ON CONFLICT DO NOTHING) por si otra petición
+                // concurrente ya insertó la matrícula.
                 await sgc_proceso_matriculas.bulkCreate(
-                    newIds.map(sid => ({ proceso_id: processId, estudiante_id: sid, tipo_matricula: 2, estatus: 1 }))
+                    newIds.map(sid => ({ proceso_id: processId, estudiante_id: sid, tipo_matricula: 2, estatus: 1 })),
+                    { ignoreDuplicates: true }
                 );
             }
+            if (reactivateIds.length > 0) {
+                await sgc_proceso_matriculas.update(
+                    { estatus: 1 },
+                    { where: { proceso_id: processId, estudiante_id: { [Op.in]: reactivateIds } } }
+                );
+            }
+            const enrolledIds = [...newIds, ...reactivateIds];
 
             // Check which newly enrolled students are also in other current processes
             let warnings = [];
-            if (newIds.length > 0) {
+            if (enrolledIds.length > 0) {
                 const multiEnrolled = await sequelize.query(`
                     SELECT DISTINCT pm.estudiante_id FROM centros.proceso_matriculas pm
                     JOIN centros.procesos p ON p.id = pm.proceso_id
                     WHERE pm.estudiante_id IN (:ids) AND pm.estatus = 1
                     AND pm.proceso_id != :processId AND p.estatus = 1
                     AND p.fecha_final >= CURRENT_DATE
-                `, { replacements: { ids: newIds, processId }, type: sequelize.QueryTypes.SELECT });
+                `, { replacements: { ids: enrolledIds, processId }, type: sequelize.QueryTypes.SELECT });
 
                 if (multiEnrolled.length > 0) {
                     const multiIds = multiEnrolled.map(r => r.estudiante_id);
@@ -2289,8 +2321,8 @@ router.post("/processes/:id/enrollments", verify_token, is_supervisor,
                 }
             }
 
-            await user_logs.create({ user_id: req.user_id, log: `Matriculó ${newIds.length} estudiante(s) al proceso ID: ${processId}` });
-            res.status(201).json({ ok: true, enrolled: newIds.length, warnings });
+            await user_logs.create({ user_id: req.user_id, log: `Matriculó ${enrolledIds.length} estudiante(s) al proceso ID: ${processId}` });
+            res.status(201).json({ ok: true, enrolled: enrolledIds.length, warnings });
         } catch (e) {
             next(e);
         }
@@ -2391,12 +2423,16 @@ router.post("/processes/:id/enrollments/excel", verify_token, is_supervisor, exc
 
             const identityToId = new Map(students.map((s) => [s.identidad, s.id]));
 
-            // Check which are already enrolled
+            // UNIQUE (proceso_id, estudiante_id) desde la migración 1772320000000:
+            // se consultan TODAS las filas (activas o no) para reactivar en vez
+            // de re-insertar cuando la matrícula fue anulada/retirada.
             const existingEnrollments = await sgc_proceso_matriculas.findAll({
-                where: { proceso_id: processId, estatus: 1 },
-                attributes: ["estudiante_id"],
+                where: { proceso_id: processId },
+                attributes: ["id", "estudiante_id", "estatus"],
+                raw: true,
             });
-            const enrolledIds = new Set(existingEnrollments.map((e) => e.estudiante_id));
+            const enrolledIds = new Set(existingEnrollments.filter((e) => e.estatus === 1).map((e) => e.estudiante_id));
+            const inactiveByStudent = new Map(existingEnrollments.filter((e) => e.estatus !== 1).map((e) => [e.estudiante_id, e.id]));
 
             let enrolled = 0;
             let removed = 0;
@@ -2414,12 +2450,19 @@ router.post("/processes/:id/enrollments/excel", verify_token, is_supervisor, exc
 
                 if (enrolledIds.has(studentId)) continue; // already enrolled, skip
 
-                await sgc_proceso_matriculas.create({
-                    proceso_id: processId,
-                    estudiante_id: studentId,
-                    tipo_matricula: 2,
-                    estatus: 1,
-                });
+                if (inactiveByStudent.has(studentId)) {
+                    await sgc_proceso_matriculas.update(
+                        { estatus: 1 },
+                        { where: { id: inactiveByStudent.get(studentId) } },
+                    );
+                } else {
+                    await sgc_proceso_matriculas.create({
+                        proceso_id: processId,
+                        estudiante_id: studentId,
+                        tipo_matricula: 2,
+                        estatus: 1,
+                    });
+                }
                 enrolled++;
             }
 

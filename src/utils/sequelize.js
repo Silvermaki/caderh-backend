@@ -214,8 +214,9 @@ export const project_financing_sources = sequelize.define('project_financing_sou
         allowNull: false,
     },
     disbursement_date: {
+        // Obligatoria desde la migración 1772330000000 (fecha de negocio del ingreso).
         type: DataTypes.DATEONLY,
-        allowNull: true,
+        allowNull: false,
     },
     created_dt: {
         type: DataTypes.DATE,
@@ -259,8 +260,9 @@ export const project_donations = sequelize.define('project_donations', {
         allowNull: false,
     },
     disbursement_date: {
+        // Obligatoria desde la migración 1772330000000 (fecha de negocio del ingreso).
         type: DataTypes.DATEONLY,
-        allowNull: true,
+        allowNull: false,
     },
     created_dt: {
         type: DataTypes.DATE,
@@ -317,6 +319,12 @@ export const project_expenses = sequelize.define('project_expenses', {
             model: 'project_donations',
             key: 'id'
         }
+    },
+    expense_date: {
+        // Fecha en que se ejecutó el gasto (fecha de negocio, obligatoria desde
+        // la migración 1772330000000). created_dt es solo la fecha de captura.
+        type: DataTypes.DATEONLY,
+        allowNull: false,
     },
     created_dt: {
         type: DataTypes.DATE,
@@ -520,6 +528,18 @@ export const sgc_nivel_escolaridads = sequelize.define('nivel_escolaridads', {
     estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 1 },
 }, { schema: "centros", tableName: "nivel_escolaridads", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
 
+export const sgc_discapacidads = sequelize.define('discapacidads', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    nombre: { type: DataTypes.TEXT, allowNull: false },
+    estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 1 },
+}, { schema: "centros", tableName: "discapacidads", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
+export const sgc_etnias = sequelize.define('etnias', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    nombre: { type: DataTypes.TEXT, allowNull: false },
+    estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 1 },
+}, { schema: "centros", tableName: "etnias", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
 export const sgc_cursos = sequelize.define('cursos', {
     id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
     codigo: { type: DataTypes.INTEGER, allowNull: true },
@@ -574,15 +594,18 @@ export const sgc_estudiantes = sequelize.define('estudiantes', {
     departamento_id: { type: DataTypes.INTEGER, allowNull: false },
     municipio_id: { type: DataTypes.INTEGER, allowNull: false },
     direccion: { type: DataTypes.TEXT, allowNull: true },
-    fecha_nacimiento: { type: DataTypes.TEXT, allowNull: true },
+    // DATE real desde la migración 1772310000000 (CHECK 1930-01-01..hoy-10años).
+    fecha_nacimiento: { type: DataTypes.DATEONLY, allowNull: true },
     estado_civil: { type: DataTypes.TEXT, allowNull: true },
+    // Canónico 'M' / 'F' (CHECK de la migración 1772310000000).
     sexo: { type: DataTypes.TEXT, allowNull: false },
     email: { type: DataTypes.TEXT, allowNull: true },
     facebook: { type: DataTypes.TEXT, allowNull: true },
     telefono: { type: DataTypes.TEXT, allowNull: true },
     celular: { type: DataTypes.TEXT, allowNull: true },
     estudia: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
-    nivel_escolaridad_id: { type: DataTypes.TEXT, allowNull: true },
+    // FK entera a centros.nivel_escolaridads (antes TEXT con JSON escapado).
+    nivel_escolaridad_id: { type: DataTypes.INTEGER, allowNull: true },
     pdf: { type: DataTypes.TEXT, allowNull: true },
     sangre: { type: DataTypes.TEXT, allowNull: true },
     vive: { type: DataTypes.TEXT, allowNull: false },
@@ -591,9 +614,11 @@ export const sgc_estudiantes = sequelize.define('estudiantes', {
     donde_trabaja: { type: DataTypes.TEXT, allowNull: true },
     puesto: { type: DataTypes.TEXT, allowNull: true },
     especial: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
-    discapacidad_id: { type: DataTypes.TEXT, allowNull: true },
+    // FK entera a centros.discapacidads (antes TEXT con JSON escapado).
+    discapacidad_id: { type: DataTypes.INTEGER, allowNull: true },
     riesgo_social: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
-    etnia_id: { type: DataTypes.TEXT, allowNull: true },
+    // FK entera a centros.etnias (antes TEXT con JSON escapado).
+    etnia_id: { type: DataTypes.INTEGER, allowNull: true },
     interno: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     nombre_r: { type: DataTypes.TEXT, allowNull: true },
     telefono_r: { type: DataTypes.TEXT, allowNull: true },
@@ -667,15 +692,19 @@ export const sgc_procesos = sequelize.define('procesos', {
     curso_id: { type: DataTypes.INTEGER, allowNull: false },
     metodologia_id: { type: DataTypes.INTEGER, allowNull: false },
     otra_metodologia: { type: DataTypes.TEXT, allowNull: true },
+    // CHECK fecha_final >= fecha_inicial (migración 1772320000000).
     fecha_inicial: { type: DataTypes.DATEONLY, allowNull: false },
     fecha_final: { type: DataTypes.DATEONLY, allowNull: false },
-    duracion_horas: { type: DataTypes.TEXT, allowNull: false },
+    // INTEGER > 0 desde la migración 1772320000000 (antes TEXT).
+    duracion_horas: { type: DataTypes.INTEGER, allowNull: false },
     tipo_jornada_id: { type: DataTypes.INTEGER, allowNull: false },
     horario: { type: DataTypes.TEXT, allowNull: false },
+    // JSON canónico de días '["1".."7"]' sin escapes (CHECK de la migración 1772320000000).
     dias: { type: DataTypes.TEXT, allowNull: false },
     sede: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     lugar: { type: DataTypes.TEXT, allowNull: true },
-    fuente_financiamiento_id: { type: DataTypes.INTEGER, allowNull: true, defaultValue: null },
+    // fuente_financiamiento_id eliminada por la migración 1772320000000: era un
+    // entero huérfano; el vínculo real es caderh.projects_processes → fuentes.
     // Cancelación explícita del proceso (requiere migración 1772200000000_proceso-cancelado.sql)
     cancelado: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 0 },
@@ -696,6 +725,42 @@ export const sgc_proceso_matriculas = sequelize.define('proceso_matriculas', {
 
 sgc_proceso_matriculas.belongsTo(sgc_procesos, { foreignKey: 'proceso_id', as: 'proceso' });
 sgc_proceso_matriculas.belongsTo(sgc_estudiantes, { foreignKey: 'estudiante_id', as: 'estudiante' });
+
+// ─── Egresados (seguimiento post-formación) ─────────────────────────────────
+// Esquema post-recaptura (migración 1772320000000): cada egreso queda atado a
+// la matrícula exacta vía proceso_matricula_id (NOT NULL + UNIQUE) y los campos
+// de empleabilidad (autoempleo/puesto/rango_salario) se capturan EN el egreso.
+// Aún no existen endpoints de captura (módulo de seguimiento pendiente); el
+// modelo queda listo para cuando se implementen.
+export const sgc_egresados = sequelize.define('egresados', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    estudiante_id: { type: DataTypes.INTEGER, allowNull: false },
+    proceso_matricula_id: { type: DataTypes.INTEGER, allowNull: false, unique: true },
+    // Códigos 1-4 heredados del SGC (CHECK tipo_egreso BETWEEN 1 AND 4).
+    tipo_egreso: { type: DataTypes.INTEGER, allowNull: false },
+    practica_profesional: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+    nombre_empresa: { type: DataTypes.TEXT, allowNull: true },
+    estudiando: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+    nombre_institucion: { type: DataTypes.TEXT, allowNull: true },
+    carrera: { type: DataTypes.TEXT, allowNull: true },
+    buscando_empleo: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+    empresas_visitadas: { type: DataTypes.TEXT, allowNull: true },
+    fecha_visita: { type: DataTypes.DATEONLY, allowNull: true },
+    trabaja_actualmente: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+    lugar_trabajo: { type: DataTypes.TEXT, allowNull: true },
+    // Autoempleo del EGRESO (dato de seguimiento, distinto de estudiantes.autoempleo
+    // que es un dato de inscripción). CHECK 0/1.
+    autoempleo: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+    puesto: { type: DataTypes.TEXT, allowNull: true },
+    rango_salario: { type: DataTypes.TEXT, allowNull: true },
+    inicio: { type: DataTypes.DATEONLY, allowNull: true },
+    deserto: { type: DataTypes.DATEONLY, allowNull: true },
+    final: { type: DataTypes.DATEONLY, allowNull: true },
+    observaciones: { type: DataTypes.TEXT, allowNull: true },
+}, { schema: "centros", tableName: "egresados", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
+sgc_egresados.belongsTo(sgc_estudiantes, { foreignKey: 'estudiante_id', as: 'estudiante' });
+sgc_egresados.belongsTo(sgc_proceso_matriculas, { foreignKey: 'proceso_matricula_id', as: 'matricula' });
 
 // ─── Projects <-> Processes (pivot) ──────────────────────────────────────────
 export const projects_processes = sequelize.define('projects_processes', {

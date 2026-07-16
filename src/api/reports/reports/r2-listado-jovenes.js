@@ -9,10 +9,11 @@ import { reportHandler, parsePagination } from '../shared.js';
 // aparece múltiples veces — cada matrícula tiene su contexto (proyecto, fuente,
 // año, trimestre, edad-en-ese-momento) distinto.
 //
-// Schema notes:
-//   - centros.estudiantes.fecha_nacimiento es TEXT — guard con regex antes de cast.
-//     El guard exige años 19xx/20xx: la data SGC trae fechas con año 0000 (el cast a date revienta) y años 0021-0200 (edades absurdas).
-//   - centros.estudiantes.sexo es TEXT libre — normalización con CASE explícito.
+// Schema notes (post-recaptura):
+//   - centros.estudiantes.fecha_nacimiento es DATE real (CHECK de rango en
+//     captura): la edad se calcula con AGE directo, sin guard de regex.
+//   - centros.estudiantes.sexo es canónico 'M'/'F'; la normalización con CASE
+//     tolera variantes heredadas y se mapea a 'Masculino'/'Femenino' para display.
 //   - centro mostrado = el centro del proceso (no el centro origen del estudiante),
 //     porque el reporte es sobre participación formativa.
 
@@ -40,20 +41,10 @@ const BASE_WHERE = `
             ELSE NULL
           END = ANY($10::text[])
         ))
-    AND ($8::int IS NULL OR (
-          CASE
-            WHEN e.fecha_nacimiento ~ '^(19|20)\\d{2}-\\d{2}-\\d{2}'
-              THEN DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento::date))::int
-            ELSE NULL
-          END >= $8
-        ))
-    AND ($9::int IS NULL OR (
-          CASE
-            WHEN e.fecha_nacimiento ~ '^(19|20)\\d{2}-\\d{2}-\\d{2}'
-              THEN DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento::date))::int
-            ELSE NULL
-          END <= $9
-        ))
+    AND ($8::int IS NULL OR
+          DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento))::int >= $8)
+    AND ($9::int IS NULL OR
+          DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento))::int <= $9)
 `;
 
 const SQL = `
@@ -78,13 +69,15 @@ const SQL = `
     EXTRACT(QUARTER FROM proc.fecha_inicial)::int  AS trimestre,
     CONCAT(e.nombres, ' ', e.apellidos)            AS nombre_completo,
     e.identidad                                    AS dni,
-    e.fecha_nacimiento                             AS fecha_nacimiento,
+    -- ::text para conservar el formato YYYY-MM-DD en el JSON (la columna ya es DATE).
+    e.fecha_nacimiento::text                       AS fecha_nacimiento,
+    DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento))::int AS edad,
+    -- Display: canónico 'M'/'F' (y variantes heredadas) → etiqueta completa.
     CASE
-      WHEN e.fecha_nacimiento ~ '^(19|20)\\d{2}-\\d{2}-\\d{2}'
-        THEN DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento::date))::int
-      ELSE NULL
-    END                                            AS edad,
-    e.sexo                                         AS sexo,
+      WHEN UPPER(TRIM(COALESCE(e.sexo,''))) IN ('M','MASCULINO','HOMBRE') THEN 'Masculino'
+      WHEN UPPER(TRIM(COALESCE(e.sexo,''))) IN ('F','FEMENINO','MUJER')   THEN 'Femenino'
+      ELSE e.sexo
+    END                                            AS sexo,
     e.estado_civil                                 AS estado_civil,
     e.celular                                      AS telefono_celular,
     e.email                                        AS correo,

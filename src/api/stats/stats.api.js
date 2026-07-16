@@ -7,8 +7,8 @@ export const router = Router();
 // GET /stats/dashboard?year=<YYYY|all>
 //
 // Filtro de año (bind $1: int o NULL = histórico; default = año actual):
-//   - Fuentes y donaciones: COALESCE(disbursement_date, created_dt)
-//   - Gastos: created_dt
+//   - Fuentes y donaciones: disbursement_date (NOT NULL desde la recaptura)
+//   - Gastos: expense_date (fecha de negocio; created_dt es solo captura)
 //   - Matrícula/procesos: año de centros.procesos.fecha_inicial
 // Exclusiones globales: proyectos DELETED y registros SGC con estatus = 0.
 // "proyectosActivos" cuenta solo project_status = 'ACTIVE', y
@@ -47,7 +47,8 @@ const FORMACION_KPIS_SQL = `
 `;
 
 // 12 buckets: Ene..Dic del año pedido, o los últimos 12 meses si es histórico.
-// Sexo normalizado con UPPER(LEFT(TRIM(...),1)) — el SGC guarda 'Masculino'/'Femenino'.
+// Sexo normalizado con UPPER(LEFT(TRIM(...),1)) — cubre el canónico 'M'/'F'
+// post-recaptura y las variantes heredadas 'Masculino'/'Femenino'.
 const MATRICULA_MENSUAL_SQL = `
   WITH months AS (
     SELECT (CASE
@@ -101,17 +102,17 @@ const FINANZAS_KPIS_SQL = `
     COALESCE((
       SELECT SUM(pfs.amount) FROM caderh.project_financing_sources pfs
       JOIN caderh.projects p ON p.id = pfs.project_id AND p.project_status <> 'DELETED'
-      WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM COALESCE(pfs.disbursement_date, pfs.created_dt)) = $1)
+      WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM pfs.disbursement_date) = $1)
     ), 0)::bigint AS fuentes_cents,
     COALESCE((
       SELECT SUM(pd.amount) FROM caderh.project_donations pd
       JOIN caderh.projects p ON p.id = pd.project_id AND p.project_status <> 'DELETED'
-      WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM COALESCE(pd.disbursement_date, pd.created_dt)) = $1)
+      WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM pd.disbursement_date) = $1)
     ), 0)::bigint AS donaciones_cents,
     COALESCE((
       SELECT SUM(pe.amount) FROM caderh.project_expenses pe
       JOIN caderh.projects p ON p.id = pe.project_id AND p.project_status <> 'DELETED'
-      WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM pe.created_dt) = $1)
+      WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM pe.expense_date) = $1)
     ), 0)::bigint AS gastos_cents
 `;
 
@@ -124,22 +125,23 @@ const CASH_EXECUTION_SQL = `
     (
       COALESCE((SELECT SUM(pfs.amount) FROM caderh.project_financing_sources pfs
         JOIN caderh.projects p ON p.id = pfs.project_id AND p.project_status <> 'DELETED'
-        WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM COALESCE(pfs.disbursement_date, pfs.created_dt)) = $1)), 0)
+        WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM pfs.disbursement_date) = $1)), 0)
       +
       COALESCE((SELECT SUM(pd.amount) FROM caderh.project_donations pd
         JOIN caderh.projects p ON p.id = pd.project_id AND p.project_status <> 'DELETED'
         WHERE pd.donation_type = 'CASH'
-          AND ($1::int IS NULL OR EXTRACT(YEAR FROM COALESCE(pd.disbursement_date, pd.created_dt)) = $1)), 0)
+          AND ($1::int IS NULL OR EXTRACT(YEAR FROM pd.disbursement_date) = $1)), 0)
     )::bigint AS ingresos_efectivo_cents,
     COALESCE((SELECT SUM(pe.amount) FROM caderh.project_expenses pe
       JOIN caderh.projects p ON p.id = pe.project_id AND p.project_status <> 'DELETED'
       LEFT JOIN caderh.project_donations pdo ON pdo.id = pe.project_donation_id
       WHERE (pe.project_donation_id IS NULL OR pdo.donation_type = 'CASH')
-        AND ($1::int IS NULL OR EXTRACT(YEAR FROM pe.created_dt) = $1)), 0)::bigint AS gastos_efectivo_cents
+        AND ($1::int IS NULL OR EXTRACT(YEAR FROM pe.expense_date) = $1)), 0)::bigint AS gastos_efectivo_cents
 `;
 
 // 12 buckets mensuales (mismo criterio de months que la matrícula).
-// Ingresos = fuentes + TODAS las donaciones; gastos por created_dt.
+// Ingresos = fuentes + TODAS las donaciones (por disbursement_date);
+// gastos por expense_date (fecha de negocio).
 const FINANZAS_MENSUAL_SQL = `
   WITH months AS (
     SELECT (CASE
@@ -150,21 +152,21 @@ const FINANZAS_MENSUAL_SQL = `
     FROM generate_series(0, 11) AS g
   ),
   fin AS (
-    SELECT date_trunc('month', COALESCE(pfs.disbursement_date::timestamp, pfs.created_dt))::date AS m,
+    SELECT date_trunc('month', pfs.disbursement_date)::date AS m,
            SUM(pfs.amount)::bigint AS cents
     FROM caderh.project_financing_sources pfs
     JOIN caderh.projects p ON p.id = pfs.project_id AND p.project_status <> 'DELETED'
     GROUP BY 1
   ),
   don AS (
-    SELECT date_trunc('month', COALESCE(pd.disbursement_date::timestamp, pd.created_dt))::date AS m,
+    SELECT date_trunc('month', pd.disbursement_date)::date AS m,
            SUM(pd.amount)::bigint AS cents
     FROM caderh.project_donations pd
     JOIN caderh.projects p ON p.id = pd.project_id AND p.project_status <> 'DELETED'
     GROUP BY 1
   ),
   exp AS (
-    SELECT date_trunc('month', pe.created_dt)::date AS m,
+    SELECT date_trunc('month', pe.expense_date)::date AS m,
            SUM(pe.amount)::bigint AS cents
     FROM caderh.project_expenses pe
     JOIN caderh.projects p ON p.id = pe.project_id AND p.project_status <> 'DELETED'
@@ -188,7 +190,7 @@ const POR_FUENTE_SQL = `
   FROM caderh.project_financing_sources pfs
   JOIN caderh.financing_sources fs ON fs.id = pfs.financing_source_id
   JOIN caderh.projects p ON p.id = pfs.project_id AND p.project_status <> 'DELETED'
-  WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM COALESCE(pfs.disbursement_date, pfs.created_dt)) = $1)
+  WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM pfs.disbursement_date) = $1)
   GROUP BY fs.name
   ORDER BY total_cents DESC
 `;
@@ -197,7 +199,7 @@ const POR_TIPO_SQL = `
   SELECT pd.donation_type, SUM(pd.amount)::bigint AS total_cents
   FROM caderh.project_donations pd
   JOIN caderh.projects p ON p.id = pd.project_id AND p.project_status <> 'DELETED'
-  WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM COALESCE(pd.disbursement_date, pd.created_dt)) = $1)
+  WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM pd.disbursement_date) = $1)
   GROUP BY pd.donation_type
 `;
 

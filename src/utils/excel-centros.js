@@ -1,5 +1,6 @@
 import xl from "excel4node";
 import XLSX from "xlsx";
+import { buildStudentPayload, normalizeIdentidad, normalizeDuracionHoras, normalizeDias, normalizeProcessDates } from "./normalize-captura.js";
 
 // ─── Styles ─────────────────────────────────────────────────────────────────
 
@@ -482,16 +483,20 @@ export function parseStudentsExcel(buffer) {
         if (!vive) { errors.push({ row: rowNum, message: "Vive es requerido" }); return; }
         if (numero_dep === null) { errors.push({ row: rowNum, message: "Num. Dependientes es requerido" }); return; }
 
-        parsed.push({
-            id, identidad, nombres, apellidos, sexo, estado_civil,
-            fecha_nacimiento: strOrNull(row["Fecha Nacimiento"]),
+        // Normalización centralizada (misma que las rutas JSON y el wizard):
+        // sexo M/F, identidad ####-####-#####, fecha DATE en rango, vive canónico,
+        // ids de catálogo enteros y banderas 0/1 (esquema post-recaptura).
+        const { payload, errors: rowErrors } = buildStudentPayload({
+            identidad, nombres, apellidos, sexo, estado_civil,
+            // Valor crudo: puede venir como Date/serial de Excel o texto ISO.
+            fecha_nacimiento: row["Fecha Nacimiento"],
             sangre: strOrNull(row["Tipo Sangre"]),
             departamento_id, municipio_id,
             direccion: strOrNull(row["Direccion"]),
             email: strOrNull(row["Email"]), telefono: strOrNull(row["Telefono"]), celular: strOrNull(row["Celular"]),
             facebook: strOrNull(row["Facebook"]), instagram: strOrNull(row["Instagram"]), twitter: strOrNull(row["Twitter"]),
             estudia: intOrZero(row["Estudia"]),
-            nivel_escolaridad_id: strOrNull(row["Nivel Escolaridad ID"]),
+            nivel_escolaridad_id: row["Nivel Escolaridad ID"],
             vive, numero_dep,
             tiene_hijos: intOrZero(row["Tiene Hijos"]), cuantos_hijos: intOrZero(row["Cuantos Hijos"]),
             vivienda: strOrNull(row["Vivienda"]),
@@ -514,15 +519,23 @@ export function parseStudentsExcel(buffer) {
             horas_dia_trabajo: strOrNull(row["Horas Dia Trabajo"]),
             socios: intOrZero(row["Socios"]), socios_cantidad: intOrZero(row["Socios Cantidad"]),
             especial: intOrZero(row["Especial"]),
-            discapacidad_id: strOrNull(row["Discapacidad ID"]),
-            // riesgo_social ya no se parsea: la columna se quitó de la plantilla y así
-            // el import no pisa el valor histórico (mismo patrón que comunidad en cursos).
-            etnia_id: strOrNull(row["Etnia ID"]),
+            discapacidad_id: row["Discapacidad ID"],
+            // riesgo_social ya no se parsea (sin la clave en el objeto,
+            // buildStudentPayload no lo incluye): la columna se quitó de la
+            // plantilla y así el import no pisa el valor histórico.
+            etnia_id: row["Etnia ID"],
             interno: intOrZero(row["Interno"]),
             nombre_r: strOrNull(row["Nombre Ref."]), telefono_r: strOrNull(row["Telefono Ref."]),
             datos_r: strOrNull(row["Datos Ref."]), parentesco_r: strOrNull(row["Parentesco Ref."]),
             adicional_r: strOrNull(row["Adicional Ref."]),
         });
+
+        if (rowErrors.length > 0) {
+            rowErrors.forEach((message) => errors.push({ row: rowNum, message }));
+            return;
+        }
+
+        parsed.push({ id, ...payload });
     });
 
     return { parsed, errors };
@@ -581,31 +594,36 @@ export function parseProcessesExcel(buffer) {
         const instructor_id = intOrNull(row["Instructor ID"]);
         const curso_id = intOrNull(row["Curso ID"]);
         const metodologia_id = intOrNull(row["Metodologia ID"]);
-        const fecha_inicial = strOrNull(row["Fecha Inicial"]);
-        const fecha_final = strOrNull(row["Fecha Final"]);
-        const duracion_horas = strOrNull(row["Duracion Horas"]);
         const tipo_jornada_id = intOrNull(row["Tipo Jornada ID"]);
         const horario = strOrNull(row["Horario"]);
-        const dias = strOrNull(row["Dias"]);
 
         if (!codigo) { errors.push({ row: rowNum, message: "Codigo es requerido" }); return; }
         if (!nombre) { errors.push({ row: rowNum, message: "Nombre es requerido" }); return; }
         if (!instructor_id) { errors.push({ row: rowNum, message: "Instructor ID es requerido" }); return; }
         if (!curso_id) { errors.push({ row: rowNum, message: "Curso ID es requerido" }); return; }
         if (!metodologia_id) { errors.push({ row: rowNum, message: "Metodologia ID es requerido" }); return; }
-        if (!fecha_inicial) { errors.push({ row: rowNum, message: "Fecha Inicial es requerido" }); return; }
-        if (!fecha_final) { errors.push({ row: rowNum, message: "Fecha Final es requerido" }); return; }
-        if (!duracion_horas) { errors.push({ row: rowNum, message: "Duracion Horas es requerido" }); return; }
         if (!tipo_jornada_id) { errors.push({ row: rowNum, message: "Tipo Jornada ID es requerido" }); return; }
         if (!horario) { errors.push({ row: rowNum, message: "Horario es requerido" }); return; }
-        if (!dias) { errors.push({ row: rowNum, message: "Dias es requerido" }); return; }
+
+        // Normalización post-recaptura (misma que las rutas JSON de procesos):
+        // duracion_horas entero > 0, fecha_final >= fecha_inicial y dias en
+        // JSON canónico ["1".."7"] (acepta CSV '2,3,5' y variantes JSON).
+        const duracion = normalizeDuracionHoras(row["Duracion Horas"]);
+        if (duracion.error) { errors.push({ row: rowNum, message: duracion.error }); return; }
+        const fechas = normalizeProcessDates(row["Fecha Inicial"], row["Fecha Final"]);
+        if (fechas.error) { errors.push({ row: rowNum, message: fechas.error }); return; }
+        const diasNorm = normalizeDias(row["Dias"]);
+        if (diasNorm.error) { errors.push({ row: rowNum, message: diasNorm.error }); return; }
 
         parsed.push({
             id, codigo, nombre,
             instructor_id, curso_id, metodologia_id,
             otra_metodologia: strOrNull(row["Otra Metodologia"]),
-            fecha_inicial, fecha_final, duracion_horas,
-            tipo_jornada_id, horario, dias,
+            fecha_inicial: fechas.value.fecha_inicial,
+            fecha_final: fechas.value.fecha_final,
+            duracion_horas: duracion.value,
+            tipo_jornada_id, horario,
+            dias: diasNorm.value,
             sede: intOrZero(row["Sede"]),
             lugar: strOrNull(row["Lugar"]),
         });
@@ -863,11 +881,12 @@ export function parseEnrollmentsExcel(buffer) {
 
     jsonRows.forEach((row, idx) => {
         const rowNum = idx + 2;
-        const identidad = strOrNull(row["Identidad"]);
+        // Normaliza al formato canónico ####-####-##### (la BD post-recaptura
+        // solo guarda ese formato, así el match por identidad no falla).
+        const norm = normalizeIdentidad(row["Identidad"]);
+        if (norm.error) { errors.push({ row: rowNum, message: norm.error }); return; }
 
-        if (!identidad) { errors.push({ row: rowNum, message: "Identidad es requerida" }); return; }
-
-        parsed.push({ identidad: identidad.trim() });
+        parsed.push({ identidad: norm.value });
     });
 
     return { parsed, errors };

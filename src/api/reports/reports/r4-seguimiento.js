@@ -5,6 +5,11 @@ import { reportHandler, parsePagination } from '../shared.js';
 // Filtros: project, cftp (centro vía proceso), financingSource (vía proyecto),
 // technicalArea (vía centros.curso_areas), year (EXTRACT de proc.fecha_inicial),
 // estatus — mismo patrón de binds que r2-listado-jovenes.js.
+//
+// Esquema post-recaptura: 'Emprendiendo' sale de eg.autoempleo (dato de
+// SEGUIMIENTO capturado en el egreso, no de estudiantes.autoempleo que es un
+// dato de inscripción). puesto y rango_salario ya existen en centros.egresados
+// y se exponen como datos reales.
 
 const FILTER_WHERE = `
   WHERE ($1::uuid[] IS NULL OR pp.project_id = ANY($1::uuid[]))
@@ -32,12 +37,14 @@ const SQL = `
     pro.name                                  AS proyecto,
     CASE
       WHEN eg.practica_profesional = 1 THEN 'Pasantía'
-      WHEN e.autoempleo           = 1 THEN 'Emprendiendo'
+      WHEN eg.autoempleo           = 1 THEN 'Emprendiendo'
       WHEN eg.trabaja_actualmente  = 1 THEN 'Trabajando'
       WHEN eg.estudiando           = 1 THEN 'Estudiando'
       ELSE 'No aplica'
     END                                       AS estatus,
-    eg.lugar_trabajo                          AS donde_trabaja
+    eg.lugar_trabajo                          AS donde_trabaja,
+    eg.puesto                                 AS puesto,
+    eg.rango_salario                          AS rango_salario
   FROM centros.egresados eg
   JOIN centros.estudiantes e             ON e.id = eg.estudiante_id
   JOIN centros.proceso_matriculas pm     ON pm.estudiante_id = e.id
@@ -49,7 +56,7 @@ const SQL = `
   ${FILTER_WHERE}
     AND ($6::text IS NULL OR
          ($6 = 'Pasantía'     AND eg.practica_profesional = 1) OR
-         ($6 = 'Emprendiendo' AND e.autoempleo           = 1) OR
+         ($6 = 'Emprendiendo' AND eg.autoempleo           = 1) OR
          ($6 = 'Trabajando'   AND eg.trabaja_actualmente  = 1) OR
          ($6 = 'Estudiando'   AND eg.estudiando           = 1)
     )
@@ -61,7 +68,7 @@ const KPI_SQL = `
   SELECT
     COUNT(*) FILTER (WHERE eg.practica_profesional = 1)::int AS pasantia,
     COUNT(*) FILTER (WHERE eg.trabaja_actualmente  = 1)::int AS trabajando,
-    COUNT(*) FILTER (WHERE e.autoempleo           = 1)::int AS emprendiendo,
+    COUNT(*) FILTER (WHERE eg.autoempleo           = 1)::int AS emprendiendo,
     COUNT(*) FILTER (WHERE eg.estudiando           = 1)::int AS estudiando,
     COUNT(*)::int                                            AS total
   FROM centros.egresados eg
@@ -124,6 +131,7 @@ export const handler = reportHandler(async (req) => {
       emprendiendo: k.emprendiendo,
       estudiando: k.estudiando,
     },
-    meta: { missingColumns: ['puesto', 'rangoSalario', 'montoKit', 'empresa'] },
+    // puesto y rango_salario ya son columnas reales de centros.egresados.
+    meta: { missingColumns: ['montoKit', 'empresa'] },
   };
 });

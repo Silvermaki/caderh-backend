@@ -3,6 +3,8 @@ import { reportHandler, centsToLmps } from '../shared.js';
 
 // R8: Overhead ejecutado por proyecto y trimestre.
 // Filtro: expense_categories.is_overhead = TRUE.
+// Año/trimestre por expense_date (fecha de negocio del gasto, NOT NULL desde
+// la recaptura; created_dt es solo la fecha técnica de captura).
 // overheadPresupuestado y pctEjecucionOverhead → missingInDb (no existe tabla de presupuesto programado).
 
 const SQL = `
@@ -11,14 +13,14 @@ const SQL = `
       p.id                                         AS project_id,
       p.name                                       AS project_name,
       pe.amount                                    AS amount_cents,
-      EXTRACT(YEAR    FROM pe.created_dt)::int     AS year,
-      EXTRACT(QUARTER FROM pe.created_dt)::int     AS quarter
+      EXTRACT(YEAR    FROM pe.expense_date)::int   AS year,
+      EXTRACT(QUARTER FROM pe.expense_date)::int   AS quarter
     FROM caderh.projects p
     LEFT JOIN caderh.project_expenses pe    ON pe.project_id = p.id
     LEFT JOIN caderh.expense_categories ec  ON ec.id = pe.expense_category_id
     WHERE ($1::uuid[] IS NULL OR p.id = ANY($1::uuid[]))
       AND ec.is_overhead = TRUE
-      AND ($2::int IS NULL OR EXTRACT(YEAR FROM pe.created_dt)::int = $2)
+      AND ($2::int IS NULL OR EXTRACT(YEAR FROM pe.expense_date)::int = $2)
   )
   SELECT
     project_id, project_name,
