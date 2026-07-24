@@ -28,6 +28,13 @@ export function toDateOnly(value) {
 
     if (value instanceof Date) {
         if (isNaN(value.getTime())) return null;
+        // Una fecha "solo día" puede venir anclada a medianoche UTC (APIs,
+        // Date.UTC) o a medianoche local (lectores de Excel). Leerla con los
+        // getters equivocados corre el día en zonas UTC-negativas como
+        // Honduras (UTC-6). Si el reloj UTC marca 00:00 es un ancla UTC.
+        if (value.getUTCHours() === 0 && value.getUTCMinutes() === 0) {
+            return `${value.getUTCFullYear()}-${pad2(value.getUTCMonth() + 1)}-${pad2(value.getUTCDate())}`;
+        }
         return `${value.getFullYear()}-${pad2(value.getMonth() + 1)}-${pad2(value.getDate())}`;
     }
 
@@ -39,12 +46,29 @@ export function toDateOnly(value) {
     }
 
     const s = String(value).trim();
-    if (!ISO_DATE_PREFIX_RE.test(s)) return null;
-    const iso = s.slice(0, 10);
-    const [y, m, d] = iso.split("-").map(Number);
-    const dt = new Date(Date.UTC(y, m - 1, d));
-    if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
-    return iso;
+    if (ISO_DATE_PREFIX_RE.test(s)) {
+        const iso = s.slice(0, 10);
+        const [y, m, d] = iso.split("-").map(Number);
+        const dt = new Date(Date.UTC(y, m - 1, d));
+        if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
+        return iso;
+    }
+
+    // Texto D/M/AAAA o DD-MM-AAAA: formato natural de los Excel del cliente
+    // (ej. "2/9/2008", "16/03/2003"). SIEMPRE día primero (convención
+    // hondureña) — nunca se interpreta como mes/día. Años de 2 dígitos se
+    // rechazan a propósito: adivinar el siglo produce fechas silenciosamente
+    // equivocadas.
+    const dmy = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/);
+    if (dmy) {
+        const d = Number(dmy[1]);
+        const m = Number(dmy[2]);
+        const y = Number(dmy[3]);
+        const dt = new Date(Date.UTC(y, m - 1, d));
+        if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
+        return `${y}-${pad2(m)}-${pad2(d)}`;
+    }
+    return null;
 }
 
 function todayLocalIso() {
@@ -70,7 +94,7 @@ export function normalizeFechaNacimiento(value) {
     }
     const iso = toDateOnly(value);
     if (!iso) {
-        return { error: `Fecha de nacimiento inválida: "${String(value).trim()}". Use el formato AAAA-MM-DD` };
+        return { error: `Fecha de nacimiento inválida: "${String(value).trim()}". Use AAAA-MM-DD o DD/MM/AAAA (año de 4 dígitos)` };
     }
     // Cota superior = hoy - 10 años (misma regla que el CHECK de la migración).
     const hoy = todayLocalIso();

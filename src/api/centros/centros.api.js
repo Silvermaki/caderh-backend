@@ -2714,7 +2714,7 @@ router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, ex
                 raw: true,
             });
             const existingIds = new Set(existingRows.map((r) => r.id));
-            const excelIds = new Set(parsed.filter((r) => r.id).map((r) => r.id));
+            const existingByIdentidad = new Map(existingRows.map((r) => [r.identidad, r.id]));
 
             // Fetch global identidades for uniqueness check
             const parsedIdentidades = parsed.map((r) => r.identidad).filter(Boolean);
@@ -2738,6 +2738,15 @@ router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, ex
                 }
                 seenIdentidades.set(row.identidad, true);
 
+                // Upsert por identidad: una fila sin ID cuya identidad ya
+                // pertenece a un estudiante activo de ESTE centro se trata
+                // como actualización de ese estudiante (reimportar el mismo
+                // archivo debe ser idempotente, no un duplicado ni un error).
+                const sameCentroId = existingByIdentidad.get(row.identidad);
+                if (!row.id && sameCentroId) {
+                    row.id = sameCentroId;
+                }
+
                 // Check if identidad already belongs to a different student (globally)
                 const existingStudentId = globalIdentidades.get(row.identidad);
                 if (existingStudentId && (!row.id || row.id !== existingStudentId)) {
@@ -2747,6 +2756,7 @@ router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, ex
 
                 validRows.push(row);
             }
+            const excelIds = new Set(validRows.filter((r) => r.id).map((r) => r.id));
 
             const protectedRows = await sgc_proceso_matriculas.findAll({
                 where: { estudiante_id: { [Op.in]: [...existingIds] }, estatus: 1 },
@@ -2758,13 +2768,25 @@ router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, ex
             let created = 0, updated = 0, deleted = 0;
             const warnings = [];
 
-            for (const existing of existingRows) {
-                if (!excelIds.has(existing.id)) {
-                    if (protectedIds.has(existing.id)) {
-                        warnings.push({ id: existing.id, message: `Estudiante ID ${existing.id} (${existing.identidad}) está protegido (tiene matrículas) y no fue eliminado` });
-                    } else {
-                        await sgc_estudiantes.update({ estatus: 0 }, { where: { id: existing.id, centro_id: centroId } });
-                        deleted++;
+            // Sincronización destructiva SOLO con archivo limpio: si alguna
+            // fila trae errores, no se elimina a nadie — una fila con error no
+            // está en `parsed`, y borrar a su estudiante por "ausencia" sería
+            // destruir datos por un error de formato (pasó en producción:
+            // reimportar un archivo con errores borraba lo creado antes).
+            if (errors.length > 0) {
+                const ausentes = existingRows.filter((r) => !excelIds.has(r.id)).length;
+                if (ausentes > 0) {
+                    warnings.push({ id: null, message: `El archivo tiene ${errors.length} error(es): no se eliminó ningún estudiante existente. Corrija los errores y reimporte para sincronizar.` });
+                }
+            } else {
+                for (const existing of existingRows) {
+                    if (!excelIds.has(existing.id)) {
+                        if (protectedIds.has(existing.id)) {
+                            warnings.push({ id: existing.id, message: `Estudiante ID ${existing.id} (${existing.identidad}) está protegido (tiene matrículas) y no fue eliminado` });
+                        } else {
+                            await sgc_estudiantes.update({ estatus: 0 }, { where: { id: existing.id, centro_id: centroId } });
+                            deleted++;
+                        }
                     }
                 }
             }

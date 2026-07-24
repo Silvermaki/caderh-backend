@@ -1,23 +1,20 @@
 import xl from "excel4node";
 import XLSX from "xlsx";
+import { toDateOnly } from "./normalize-captura.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Fechas SIEMPRE vía toDateOnly (ISO, serial de Excel, Date o D/M/AAAA con
+// día primero). El `new Date(s)` anterior interpretaba "2/9/2026" como
+// mes/día (9 de febrero) y guardaba fechas equivocadas EN SILENCIO.
 function formatDate(val) {
-    if (!val) return "";
-    if (val instanceof Date) return val.toISOString().slice(0, 10);
-    const s = String(val).trim();
-    if (!s) return "";
-    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-    const d = new Date(s);
-    return isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
+    return toDateOnly(val) ?? "";
 }
 
 function parseDate(val) {
-    const out = formatDate(val);
-    return out || null;
+    return toDateOnly(val);
 }
 
 const DONATION_TYPE_MAP = {
