@@ -96,30 +96,21 @@ const MATRICULA_AREA_SQL = `
 
 // ─── Finanzas ────────────────────────────────────────────────────────────────
 
+// Criterio CADERH (igual que el header del proyecto y R6): solo el efectivo
+// suma. Ingresos recibidos = fuentes + donaciones CASH; gastos = gastos en
+// efectivo (generales, contra fuente o contra donación CASH). Las donaciones
+// en suministros/beneficios y los gastos imputados a ellas no entran; las
+// donaciones por tipo se siguen viendo en el donut.
 const FINANZAS_KPIS_SQL = `
   SELECT
-    (SELECT COUNT(*) FROM caderh.projects WHERE project_status = 'ACTIVE')::int AS proyectos_activos,
-    COALESCE((
-      SELECT SUM(pfs.amount) FROM caderh.project_financing_sources pfs
-      JOIN caderh.projects p ON p.id = pfs.project_id AND p.project_status <> 'DELETED'
-      WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM pfs.disbursement_date) = $1)
-    ), 0)::bigint AS fuentes_cents,
-    COALESCE((
-      SELECT SUM(pd.amount) FROM caderh.project_donations pd
-      JOIN caderh.projects p ON p.id = pd.project_id AND p.project_status <> 'DELETED'
-      WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM pd.disbursement_date) = $1)
-    ), 0)::bigint AS donaciones_cents,
-    COALESCE((
-      SELECT SUM(pe.amount) FROM caderh.project_expenses pe
-      JOIN caderh.projects p ON p.id = pe.project_id AND p.project_status <> 'DELETED'
-      WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM pe.expense_date) = $1)
-    ), 0)::bigint AS gastos_cents
+    (SELECT COUNT(*) FROM caderh.projects WHERE project_status = 'ACTIVE')::int AS proyectos_activos
 `;
 
 // % de ejecución financiera oficial (misma técnica que CASH_EXECUTION_SQL de
 // r7-ingreso-consolidado.js): gastos en efectivo ÷ ingresos en efectivo, donde
 // ingresos en efectivo = fuentes + donaciones CASH y gasto en efectivo = no
-// imputado a una donación o imputado a una donación CASH.
+// imputado a una donación o imputado a una donación CASH. Sus dos cifras son
+// también los KPIs "Ingresos Recibidos" y "Gastos".
 const CASH_EXECUTION_SQL = `
   SELECT
     (
@@ -140,8 +131,8 @@ const CASH_EXECUTION_SQL = `
 `;
 
 // 12 buckets mensuales (mismo criterio de months que la matrícula).
-// Ingresos = fuentes + TODAS las donaciones (por disbursement_date);
-// gastos por expense_date (fecha de negocio).
+// Ingresos = fuentes + donaciones CASH (por disbursement_date); gastos en
+// efectivo por expense_date (fecha de negocio).
 const FINANZAS_MENSUAL_SQL = `
   WITH months AS (
     SELECT (CASE
@@ -163,6 +154,7 @@ const FINANZAS_MENSUAL_SQL = `
            SUM(pd.amount)::bigint AS cents
     FROM caderh.project_donations pd
     JOIN caderh.projects p ON p.id = pd.project_id AND p.project_status <> 'DELETED'
+    WHERE pd.donation_type = 'CASH'
     GROUP BY 1
   ),
   exp AS (
@@ -170,6 +162,8 @@ const FINANZAS_MENSUAL_SQL = `
            SUM(pe.amount)::bigint AS cents
     FROM caderh.project_expenses pe
     JOIN caderh.projects p ON p.id = pe.project_id AND p.project_status <> 'DELETED'
+    LEFT JOIN caderh.project_donations pdo ON pdo.id = pe.project_donation_id
+    WHERE pe.project_donation_id IS NULL OR pdo.donation_type = 'CASH'
     GROUP BY 1
   )
   SELECT
@@ -277,7 +271,7 @@ router.get('/dashboard', verify_token, is_authenticated,
                 sequelize.query(FORMACION_KPIS_SQL, { bind }),
                 sequelize.query(MATRICULA_MENSUAL_SQL, { bind }),
                 sequelize.query(MATRICULA_AREA_SQL, { bind }),
-                sequelize.query(FINANZAS_KPIS_SQL, { bind }),
+                sequelize.query(FINANZAS_KPIS_SQL),
                 sequelize.query(CASH_EXECUTION_SQL, { bind }),
                 sequelize.query(FINANZAS_MENSUAL_SQL, { bind }),
                 sequelize.query(POR_FUENTE_SQL, { bind }),
@@ -321,8 +315,8 @@ router.get('/dashboard', verify_token, is_authenticated,
 
             const finanzas = {
                 proyectosActivos: Number(kk.proyectos_activos ?? 0),
-                ingresosRecibidos: centsToLmps(kk.fuentes_cents) + centsToLmps(kk.donaciones_cents),
-                gastos: centsToLmps(kk.gastos_cents),
+                ingresosRecibidos: ingresosEfectivo,
+                gastos: gastosEfectivo,
                 // 1 decimal, sin tope; null si no hay ingresos en efectivo.
                 pctEjecucion: ingresosEfectivo > 0
                     ? round1((gastosEfectivo / ingresosEfectivo) * 100)

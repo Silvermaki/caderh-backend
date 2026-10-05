@@ -10,8 +10,10 @@ import { reportHandler, centsToLmps } from '../shared.js';
 // Reglas:
 //   1. DESEMB. Q1-Q4 vienen de project_financing_sources agrupadas por
 //      QUARTER(disbursement_date). No se infieren de donaciones CASH.
-//   2. Presupuesto Global = SUM(financing_sources) + SUM(donations) (todas)
-//      — misma fórmula que el dashboard del proyecto (financed_amount).
+//   2. Presupuesto Global = SUM(financing_sources) + SUM(donaciones CASH) —
+//      misma fórmula que el header del proyecto (financed_amount). Criterio
+//      CADERH: la especie es ahorro, no ingreso; suministros y beneficios no
+//      suman y se informan en sus propias columnas.
 //   3. Donaciones en efectivo son una columna aparte (detalle);
 //      no se cuentan como desembolso.
 //   4. Vigencia (req 6): solo se incluyen movimientos cuya fecha de NEGOCIO cae
@@ -20,7 +22,10 @@ import { reportHandler, centsToLmps } from '../shared.js';
 //      (created_dt es solo la fecha técnica de captura). Con las fechas
 //      NOT NULL del esquema post-recaptura ya no existe el bucket "sin fecha".
 //   5. Reporte financiero (req 8): se agregan gastos ejecutados y saldo
-//      disponible (ingresos recibidos − gastos ejecutados).
+//      disponible (presupuesto global − gastos ejecutados). Gastos ejecutados
+//      = pagados con el presupuesto: generales, contra fuente o contra donación
+//      CASH; los imputados a suministros/beneficios se rebajan de esas
+//      donaciones, no del presupuesto.
 
 const SQL = `
   WITH financing AS (
@@ -85,9 +90,9 @@ const SQL = `
   donations_agg AS (
     SELECT
       project_id,
-      COALESCE(SUM(don_amount), 0)::bigint AS total_don_cents,
-      COALESCE(SUM(CASE WHEN don_type = 'SUPPLY' THEN don_amount ELSE 0 END), 0)::bigint AS in_kind_cents,
-      COALESCE(SUM(CASE WHEN don_type = 'CASH'   THEN don_amount ELSE 0 END), 0)::bigint AS cash_cents
+      COALESCE(SUM(CASE WHEN don_type = 'SUPPLY'  THEN don_amount ELSE 0 END), 0)::bigint AS in_kind_cents,
+      COALESCE(SUM(CASE WHEN don_type = 'BENEFIT' THEN don_amount ELSE 0 END), 0)::bigint AS benefit_cents,
+      COALESCE(SUM(CASE WHEN don_type = 'CASH'    THEN don_amount ELSE 0 END), 0)::bigint AS cash_cents
     FROM donations
     WHERE ($2::int IS NULL OR don_year = $2)
     GROUP BY project_id
@@ -95,7 +100,6 @@ const SQL = `
   expenses_agg AS (
     SELECT
       project_id,
-      COALESCE(SUM(exp_amount), 0)::bigint AS gastos_cents,
       -- Gastos en efectivo: excluye los imputados a donaciones en especie o
       -- beneficio (criterio CADERH para el % de ejecución financiera).
       COALESCE(SUM(CASE WHEN exp_don_type IS NULL OR exp_don_type = 'CASH' THEN exp_amount ELSE 0 END), 0)::bigint AS gastos_efectivo_cents
@@ -106,10 +110,11 @@ const SQL = `
   SELECT
     pr.project_id,
     pr.project_name,
-    -- Presupuesto Global = financing_sources + todas las donaciones (igual que dashboard)
-    (COALESCE(fa.financing_total_cents, 0) + COALESCE(da.total_don_cents, 0)) AS presupuesto_global_cents,
+    -- Presupuesto Global = fuentes + donaciones en efectivo (ingresos en
+    -- efectivo; igual que el header del proyecto)
+    (COALESCE(fa.financing_total_cents, 0) + COALESCE(da.cash_cents, 0)) AS presupuesto_global_cents,
     -- Presupuesto Anual: por ahora se mantiene aliased al global (a definir)
-    (COALESCE(fa.financing_total_cents, 0) + COALESCE(da.total_don_cents, 0)) AS presupuesto_anual_cents,
+    (COALESCE(fa.financing_total_cents, 0) + COALESCE(da.cash_cents, 0)) AS presupuesto_anual_cents,
     COALESCE(fa.q1_cents, 0)                                   AS desembolso_q1_cents,
     COALESCE(fa.q2_cents, 0)                                   AS desembolso_q2_cents,
     COALESCE(fa.q3_cents, 0)                                   AS desembolso_q3_cents,
@@ -117,14 +122,13 @@ const SQL = `
     (COALESCE(fa.q1_cents, 0) + COALESCE(fa.q2_cents, 0) + COALESCE(fa.q3_cents, 0) + COALESCE(fa.q4_cents, 0)) AS total_desembolsado_cents,
     COALESCE(fa.financing_total_cents, 0)                      AS total_financiamiento_cents,
     COALESCE(da.in_kind_cents, 0)                              AS donaciones_especie_cents,
+    COALESCE(da.benefit_cents, 0)                              AS donaciones_beneficio_cents,
     COALESCE(da.cash_cents,    0)                              AS donaciones_efectivo_cents,
-    COALESCE(ea.gastos_cents,  0)                              AS gastos_ejecutados_cents,
-    (COALESCE(fa.financing_total_cents, 0) + COALESCE(da.total_don_cents, 0) - COALESCE(ea.gastos_cents, 0)) AS saldo_disponible_cents,
-    -- Ingresos en efectivo del período: fuentes + donaciones CASH. Con
-    -- disbursement_date NOT NULL toda fuente está fechada, así que el filtro
-    -- de año aplica simétrico a fuentes y gastos (ya no hay bucket sin fecha).
-    (COALESCE(fa.financing_total_cents, 0) + COALESCE(da.cash_cents, 0)) AS ingresos_efectivo_cents,
-    COALESCE(ea.gastos_efectivo_cents, 0)                      AS gastos_efectivo_cents
+    -- Gastos ejecutados = gastos en efectivo. Con disbursement_date NOT NULL
+    -- toda fuente está fechada, así que el filtro de año aplica simétrico a
+    -- fuentes y gastos (ya no hay bucket sin fecha).
+    COALESCE(ea.gastos_efectivo_cents, 0)                      AS gastos_ejecutados_cents,
+    (COALESCE(fa.financing_total_cents, 0) + COALESCE(da.cash_cents, 0) - COALESCE(ea.gastos_efectivo_cents, 0)) AS saldo_disponible_cents
   FROM proj pr
   LEFT JOIN finance_agg fa ON fa.project_id = pr.project_id
   LEFT JOIN donations_agg da ON da.project_id = pr.project_id
@@ -146,19 +150,15 @@ export const handler = reportHandler(async (req) => {
     bind: [projectUuids, year],
   });
 
+  // % de ejecución financiera (criterio CADERH): gastos ejecutados en
+  // efectivo ÷ ingresos recibidos en efectivo × 100 — es decir, las mismas
+  // columnas "Gastos ejecutados" ÷ "Presupuesto global" (especie excluida).
+  const pctOf = (gastos, presupuesto) => (presupuesto > 0 ? (gastos / presupuesto) * 100 : 0);
+
   const out = rows.map((r) => {
     const presupuestoGlobal   = centsToLmps(r.presupuesto_global_cents);
-    const totalDesembolsado   = centsToLmps(r.total_desembolsado_cents);
-    // % de ejecución financiera (criterio CADERH): gastos ejecutados en
-    // efectivo ÷ ingresos recibidos en efectivo × 100 (especie excluida).
-    const ingresosEfectivo    = centsToLmps(r.ingresos_efectivo_cents);
-    const gastosEfectivo      = centsToLmps(r.gastos_efectivo_cents);
-    const pctEjecucion        = ingresosEfectivo > 0
-      ? (gastosEfectivo / ingresosEfectivo) * 100
-      : 0;
+    const gastosEjecutados    = centsToLmps(r.gastos_ejecutados_cents);
     return {
-      ingresosEfectivo,
-      gastosEfectivo,
       projectId:            r.project_id,
       projectName:          r.project_name,
       presupuestoGlobal,
@@ -167,11 +167,12 @@ export const handler = reportHandler(async (req) => {
       desembolsoQ2:         centsToLmps(r.desembolso_q2_cents),
       desembolsoQ3:         centsToLmps(r.desembolso_q3_cents),
       desembolsoQ4:         centsToLmps(r.desembolso_q4_cents),
-      totalDesembolsado,
-      pctEjecucion,
+      totalDesembolsado:    centsToLmps(r.total_desembolsado_cents),
+      pctEjecucion:         pctOf(gastosEjecutados, presupuestoGlobal),
       donacionesEspecie:    centsToLmps(r.donaciones_especie_cents),
+      donacionesBeneficio:  centsToLmps(r.donaciones_beneficio_cents),
       donacionesEfectivo:   centsToLmps(r.donaciones_efectivo_cents),
-      gastosEjecutados:     centsToLmps(r.gastos_ejecutados_cents),
+      gastosEjecutados,
       saldoDisponible:      centsToLmps(r.saldo_disponible_cents),
     };
   });
@@ -185,22 +186,18 @@ export const handler = reportHandler(async (req) => {
     desembolsoQ4:        acc.desembolsoQ4        + r.desembolsoQ4,
     totalDesembolsado:   acc.totalDesembolsado   + r.totalDesembolsado,
     donacionesEspecie:   acc.donacionesEspecie   + r.donacionesEspecie,
+    donacionesBeneficio: acc.donacionesBeneficio + r.donacionesBeneficio,
     donacionesEfectivo:  acc.donacionesEfectivo  + r.donacionesEfectivo,
     gastosEjecutados:    acc.gastosEjecutados    + r.gastosEjecutados,
     saldoDisponible:     acc.saldoDisponible     + r.saldoDisponible,
-    ingresosEfectivo:    acc.ingresosEfectivo    + r.ingresosEfectivo,
-    gastosEfectivo:      acc.gastosEfectivo      + r.gastosEfectivo,
   }), {
     presupuestoGlobal: 0, presupuestoAnual: 0,
     desembolsoQ1: 0, desembolsoQ2: 0, desembolsoQ3: 0, desembolsoQ4: 0,
     totalDesembolsado: 0,
-    donacionesEspecie: 0, donacionesEfectivo: 0,
+    donacionesEspecie: 0, donacionesBeneficio: 0, donacionesEfectivo: 0,
     gastosEjecutados: 0, saldoDisponible: 0,
-    ingresosEfectivo: 0, gastosEfectivo: 0,
   });
-  totals.pctEjecucion = totals.ingresosEfectivo > 0
-    ? (totals.gastosEfectivo / totals.ingresosEfectivo) * 100
-    : 0;
+  totals.pctEjecucion = pctOf(totals.gastosEjecutados, totals.presupuestoGlobal);
 
   return { rows: out, total: out.length, totals };
 });

@@ -218,6 +218,45 @@ router.delete('/financing-source', verify_token, is_supervisor,
     }
 );
 
+// Totales financieros del header del proyecto. Listado y detalle usan esta
+// MISMA definición para que ambas vistas muestren las mismas cifras.
+// Criterio CADERH (Word "Módulos SG Operaciones 2025": "Donaciones: en especie
+// (ahorro) y en efectivo (es un ingreso)"; notas del 18/08/2026): solo el
+// efectivo suma al presupuesto. Las donaciones en suministros (SUPPLY) y
+// beneficios (BENEFIT) se controlan aparte, cada una con su disponible.
+//   financed_amount = fuentes + donaciones CASH          (Presupuesto General)
+//   total_expenses  = gastos sin origen, contra fuente o
+//                     contra donación CASH               (Presupuesto Ejecutado)
+//   <tipo>_donations / <tipo>_consumed = recibido / gastos imputados a ese tipo
+// El % de ejecución financiera (numeral 9) es total_expenses ÷ financed_amount.
+const donations_sum_sql = (type) =>
+    `COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = '${type}'), 0)`;
+const consumed_sum_sql = (type) =>
+    `COALESCE((SELECT SUM(pe.amount) FROM caderh.project_expenses pe
+        JOIN caderh.project_donations pd ON pd.id = pe.project_donation_id
+        WHERE pe.project_id = "projects".id AND pd.donation_type = '${type}'), 0)`;
+
+function project_finance_attributes() {
+    return [
+        [sequelize.literal(`(
+            COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
+            ${donations_sum_sql("CASH")}
+        ) / 100.0`), "financed_amount"],
+        [sequelize.literal(`(
+            COALESCE((SELECT SUM(pe.amount) FROM caderh.project_expenses pe
+                LEFT JOIN caderh.project_donations pd ON pd.id = pe.project_donation_id
+                WHERE pe.project_id = "projects".id
+                  AND (pe.project_donation_id IS NULL OR pd.donation_type = 'CASH')), 0)
+        ) / 100.0`), "total_expenses"],
+        [sequelize.literal(`(${donations_sum_sql("CASH")}) / 100.0`), "cash_donations"],
+        [sequelize.literal(`(${consumed_sum_sql("CASH")}) / 100.0`), "cash_donations_consumed"],
+        [sequelize.literal(`(${donations_sum_sql("SUPPLY")}) / 100.0`), "in_kind_donations"],
+        [sequelize.literal(`(${consumed_sum_sql("SUPPLY")}) / 100.0`), "in_kind_consumed"],
+        [sequelize.literal(`(${donations_sum_sql("BENEFIT")}) / 100.0`), "benefit_donations"],
+        [sequelize.literal(`(${consumed_sum_sql("BENEFIT")}) / 100.0`), "benefit_consumed"],
+    ];
+}
+
 // List projects
 router.get("/projects", verify_token, is_authenticated,
     async (req, res, next) => {
@@ -253,29 +292,7 @@ router.get("/projects", verify_token, is_authenticated,
                     "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "project_category", "created_dt",
                     [sequelize.literal(`("projects".total_budget / 100.0)`), "total_budget"],
                     [sequelize.literal(`(SELECT COALESCE(json_agg(json_build_object('id', u.id, 'name', u.name)), '[]') FROM caderh.projects_agents pa JOIN caderh.users u ON u.id = pa.agent_id WHERE pa.project_id = "projects".id)`), "assigned_agents"],
-                    [sequelize.literal(`(
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id), 0)
-                    ) / 100.0`), "financed_amount"],
-                    [sequelize.literal(`(
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_expenses WHERE project_id = "projects".id), 0)
-                    ) / 100.0`), "total_expenses"],
-                    [sequelize.literal(`(
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'SUPPLY'), 0)
-                    ) / 100.0`), "in_kind_donations"],
-                    [sequelize.literal(`(
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
-                    ) / 100.0`), "cash_donations"],
-                    [sequelize.literal(`(
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
-                    ) / 100.0`), "cash_income"],
-                    [sequelize.literal(`(
-                        COALESCE((SELECT SUM(pe.amount) FROM caderh.project_expenses pe
-                            LEFT JOIN caderh.project_donations pd ON pd.id = pe.project_donation_id
-                            WHERE pe.project_id = "projects".id
-                              AND (pe.project_donation_id IS NULL OR pd.donation_type = 'CASH')), 0)
-                    ) / 100.0`), "cash_expenses"],
+                    ...project_finance_attributes(),
                 ],
                 where,
                 order: sort ? [[sort, desc]] : undefined,
@@ -321,29 +338,7 @@ router.get("/projects/:id", verify_token, is_authenticated,
                     "id", "name", "description", "objectives", "start_date", "end_date", "accomplishments", "project_status", "project_category", "created_dt",
                     [sequelize.literal(`("projects".total_budget / 100.0)`), "total_budget"],
                     [sequelize.literal(`(SELECT COALESCE(json_agg(json_build_object('id', u.id, 'name', u.name)), '[]') FROM caderh.projects_agents pa JOIN caderh.users u ON u.id = pa.agent_id WHERE pa.project_id = "projects".id)`), "assigned_agents"],
-                    [sequelize.literal(`(
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id), 0)
-                    ) / 100.0`), "financed_amount"],
-                    [sequelize.literal(`(
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_expenses WHERE project_id = "projects".id), 0)
-                    ) / 100.0`), "total_expenses"],
-                    [sequelize.literal(`(
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'SUPPLY'), 0)
-                    ) / 100.0`), "in_kind_donations"],
-                    [sequelize.literal(`(
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
-                    ) / 100.0`), "cash_donations"],
-                    [sequelize.literal(`(
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_financing_sources WHERE project_id = "projects".id), 0) +
-                        COALESCE((SELECT SUM(amount) FROM caderh.project_donations WHERE project_id = "projects".id AND donation_type = 'CASH'), 0)
-                    ) / 100.0`), "cash_income"],
-                    [sequelize.literal(`(
-                        COALESCE((SELECT SUM(pe.amount) FROM caderh.project_expenses pe
-                            LEFT JOIN caderh.project_donations pd ON pd.id = pe.project_donation_id
-                            WHERE pe.project_id = "projects".id
-                              AND (pe.project_donation_id IS NULL OR pd.donation_type = 'CASH')), 0)
-                    ) / 100.0`), "cash_expenses"],
+                    ...project_finance_attributes(),
                 ],
             });
             if (!project || project.project_status === 'DELETED') {

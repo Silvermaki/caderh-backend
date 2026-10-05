@@ -5,6 +5,9 @@ import { reportHandler, centsToLmps } from '../shared.js';
 // Filtro: expense_categories.is_overhead = TRUE.
 // Año/trimestre por expense_date (fecha de negocio del gasto, NOT NULL desde
 // la recaptura; created_dt es solo la fecha técnica de captura).
+// Solo gasto en efectivo (criterio CADERH, igual que el header del proyecto):
+// lo imputado a suministros/beneficios se rebaja de esas donaciones y no es
+// presupuesto ejecutado. Se excluyen proyectos eliminados (soft delete).
 // overheadPresupuestado y pctEjecucionOverhead → missingInDb (no existe tabla de presupuesto programado).
 
 const SQL = `
@@ -18,8 +21,11 @@ const SQL = `
     FROM caderh.projects p
     LEFT JOIN caderh.project_expenses pe    ON pe.project_id = p.id
     LEFT JOIN caderh.expense_categories ec  ON ec.id = pe.expense_category_id
+    LEFT JOIN caderh.project_donations pdo  ON pdo.id = pe.project_donation_id
     WHERE ($1::uuid[] IS NULL OR p.id = ANY($1::uuid[]))
+      AND p.project_status <> 'DELETED'
       AND ec.is_overhead = TRUE
+      AND (pe.project_donation_id IS NULL OR pdo.donation_type = 'CASH')
       AND ($2::int IS NULL OR EXTRACT(YEAR FROM pe.expense_date)::int = $2)
   )
   SELECT
