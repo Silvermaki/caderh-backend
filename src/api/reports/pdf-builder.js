@@ -46,6 +46,8 @@ function isPercentKey(k) {
 function formatCellValue(value, columnKey, missingInDb) {
   if (missingInDb) return '—';
   if (value == null || value === '') return '';
+  // Un año no lleva separador de miles ("2026", no "2,026").
+  if (/^(year|anio|año)$/i.test(columnKey)) return String(value);
   if (typeof value === 'number' && Number.isFinite(value)) {
     if (isCurrencyKey(columnKey)) {
       return `L ${value.toLocaleString('es-HN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;

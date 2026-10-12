@@ -525,6 +525,12 @@ router.post("/centros/wizard", verify_token, is_supervisor,
                         errors.push(`Estudiante "${payload.identidad}": ya existe en el sistema`);
                         continue;
                     }
+                    // Dado de baja en otro centro: se reactiva su registro aquí.
+                    if (await reactivateInactiveStudent(payload.identidad, payload, centroId, t)) {
+                        existingIdentidades.add(payload.identidad);
+                        studentsCreated++;
+                        continue;
+                    }
                     await sgc_estudiantes.create({
                         centro_id: centroId,
                         estatus: 1,
@@ -1018,6 +1024,20 @@ router.get("/centros/:centroId/estudiantes", verify_token, is_authenticated,
     }
 );
 
+// Una persona = un registro: si la identidad pertenece a un estudiante dado de
+// baja, se reactiva ese mismo registro con los datos nuevos (en el centro
+// indicado) en vez de crear otra fila. Devuelve su id, o null si no hay ninguno.
+async function reactivateInactiveStudent(identidad, data, centroId, transaction) {
+    const inactive = await sgc_estudiantes.findOne({
+        where: { identidad, estatus: { [Op.ne]: 1 } },
+        order: [["updated_at", "DESC"], ["id", "DESC"]],
+        transaction,
+    });
+    if (!inactive) return null;
+    await inactive.update({ ...data, centro_id: centroId, estatus: 1 }, { transaction });
+    return inactive.id;
+}
+
 router.post("/centros/:centroId/estudiantes", verify_token, is_supervisor,
     async (req, res, next) => {
         try {
@@ -1035,6 +1055,12 @@ router.post("/centros/:centroId/estudiantes", verify_token, is_supervisor,
 
             const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: payload.identidad, estatus: 1 } });
             if (existingByIdentidad) return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
+
+            const reactivatedId = await reactivateInactiveStudent(payload.identidad, payload, centroId);
+            if (reactivatedId) {
+                await user_logs.create({ user_id: req.user_id, log: `Reactivó estudiante ID: ${reactivatedId}, CENTRO: ${centroId}` });
+                return res.status(201).json({ ok: true, id: reactivatedId, reactivated: true });
+            }
 
             const estudiante = await sgc_estudiantes.create({
                 centro_id: centroId, estatus: 1, ...payload,
@@ -1388,6 +1414,12 @@ router.post("/students", verify_token, is_supervisor,
 
             const existingByIdentidad = await sgc_estudiantes.findOne({ where: { identidad: payload.identidad, estatus: 1 } });
             if (existingByIdentidad) return res.status(409).json({ message: "Ya existe un estudiante con esta identidad" });
+
+            const reactivatedId = await reactivateInactiveStudent(payload.identidad, payload, b.centro_id);
+            if (reactivatedId) {
+                await user_logs.create({ user_id: req.user_id, log: `Reactivó estudiante ID: ${reactivatedId}, CENTRO: ${b.centro_id}` });
+                return res.status(201).json({ ok: true, id: reactivatedId, reactivated: true });
+            }
 
             const student = await sgc_estudiantes.create({
                 centro_id: b.centro_id, estatus: 1, ...payload,
@@ -2725,6 +2757,32 @@ router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, ex
             });
             const globalIdentidades = new Map(globalExisting.map((r) => [r.identidad, r.id]));
 
+            // Estudiantes DADOS DE BAJA que el archivo trae de vuelta (por su ID
+            // o por su identidad, en cualquier centro): se reactivan en vez de
+            // crear otra fila, así cada persona conserva un único registro (y su
+            // ID) aunque una importación anterior la haya dado de baja.
+            const parsedIds = parsed.map((r) => r.id).filter(Boolean);
+            const inactiveRows = parsed.length === 0 ? [] : await sgc_estudiantes.findAll({
+                where: {
+                    estatus: { [Op.ne]: 1 },
+                    [Op.or]: [
+                        { identidad: { [Op.in]: parsedIdentidades } },
+                        ...(parsedIds.length > 0 ? [{ id: { [Op.in]: parsedIds } }] : []),
+                    ],
+                },
+                attributes: ["id", "identidad"],
+                order: [["updated_at", "DESC"], ["id", "DESC"]],
+                raw: true,
+            });
+            const inactiveIds = new Set(inactiveRows.map((r) => r.id));
+            // Si hubiera varias filas de baja con la misma identidad (datos
+            // previos a la consolidación), se reactiva la más reciente.
+            const inactiveByIdentidad = new Map();
+            for (const r of inactiveRows) {
+                if (!inactiveByIdentidad.has(r.identidad)) inactiveByIdentidad.set(r.identidad, r.id);
+            }
+            const reactivateIds = new Set();
+
             // Validate unique identidad within excel + existing (globally)
             const seenIdentidades = new Map();
             const validRows = [];
@@ -2747,6 +2805,15 @@ router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, ex
                     row.id = sameCentroId;
                 }
 
+                // Reactivación: la fila no es de un activo de este centro, pero
+                // su ID o su identidad pertenecen a alguien dado de baja.
+                if (!(row.id && existingIds.has(row.id))) {
+                    const inactiveId = row.id && inactiveIds.has(row.id)
+                        ? row.id
+                        : inactiveByIdentidad.get(row.identidad);
+                    if (inactiveId) row.id = inactiveId;
+                }
+
                 // Check if identidad already belongs to a different student (globally)
                 const existingStudentId = globalIdentidades.get(row.identidad);
                 if (existingStudentId && (!row.id || row.id !== existingStudentId)) {
@@ -2754,6 +2821,7 @@ router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, ex
                     continue;
                 }
 
+                if (row.id && inactiveIds.has(row.id)) reactivateIds.add(row.id);
                 validRows.push(row);
             }
             const excelIds = new Set(validRows.filter((r) => r.id).map((r) => r.id));
@@ -2765,7 +2833,7 @@ router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, ex
             });
             const protectedIds = new Set(protectedRows.map((r) => r.estudiante_id));
 
-            let created = 0, updated = 0, deleted = 0;
+            let created = 0, updated = 0, reactivated = 0, deleted = 0;
             const warnings = [];
 
             // Sincronización destructiva SOLO con archivo limpio: si alguna
@@ -2797,6 +2865,12 @@ router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, ex
                         const { id, ...data } = row;
                         await sgc_estudiantes.update(data, { where: { id, centro_id: centroId } });
                         updated++;
+                    } else if (row.id && reactivateIds.has(row.id)) {
+                        // Mismo registro de antes: vuelve a estar activo, en este
+                        // centro y con los datos del archivo.
+                        const { id, ...data } = row;
+                        await sgc_estudiantes.update({ ...data, centro_id: centroId, estatus: 1 }, { where: { id } });
+                        reactivated++;
                     } else {
                         await sgc_estudiantes.create({ ...row, id: undefined, centro_id: centroId, estatus: 1 });
                         created++;
@@ -2808,10 +2882,10 @@ router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, ex
 
             await user_logs.create({
                 user_id: req.user_id,
-                log: `Importó estudiantes por Excel en centro ${centroId} (${created} creados, ${updated} actualizados, ${deleted} eliminados, ${warnings.length} protegidos)`,
+                log: `Importó estudiantes por Excel en centro ${centroId} (${created} creados, ${reactivated} reactivados, ${updated} actualizados, ${deleted} eliminados, ${warnings.length} protegidos)`,
             });
 
-            res.status(200).json({ ok: true, created, updated, deleted, warnings, errors, processed: created + updated });
+            res.status(200).json({ ok: true, created, updated, reactivated, deleted, warnings, errors, processed: created + updated + reactivated });
         } catch (e) {
             next(e);
         }

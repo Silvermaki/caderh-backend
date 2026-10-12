@@ -1,109 +1,120 @@
 import { sequelize } from '../../../utils/sequelize.js';
 import { reportHandler, centsToLmps } from '../shared.js';
 
-// Correcciones:
-//   1. Se excluyen proyectos eliminados (soft delete): antes las donaciones y
-//      fuentes de proyectos DELETED inflaban los totales.
-//   2. El trimestre se deriva de la fecha de ingreso (disbursement_date,
-//      NOT NULL desde la recaptura) — consistente con R6 (req 10).
-//   3. Gran total ya no doble-cuenta el efectivo: "donaciones" ahora agrupa
-//      solo especie/beneficio, y granTotal = efectivo + especie/beneficio.
+// R7: Ingreso total consolidado — trimestral y anual, con % de ejecución.
+//
+// Criterio CADERH (igual que el header del proyecto, R6 y el dashboard): solo
+// el efectivo es ingreso ("Donaciones: en especie (ahorro) y en efectivo (es
+// un ingreso)").
+//   · Ingresos en efectivo = desembolsos de fuentes de financiamiento +
+//     donaciones CASH, por trimestre de su fecha de ingreso (disbursement_date).
+//     Antes las filas se armaban solo con donaciones y las fuentes —el ingreso
+//     principal— no aparecían: un año sin donaciones salía vacío.
+//   · Gastos en efectivo = gastos generales, contra fuente o contra donación
+//     CASH, por trimestre de expense_date. Los imputados a suministros o
+//     beneficios se rebajan de esas donaciones; no son presupuesto ejecutado.
+//   · % de ejecución ACUMULADO = gastos del año hasta ese trimestre ÷ ingresos
+//     del año hasta ese trimestre (el de Q4 es el % del año; null = N/D: hubo
+//     gasto antes de registrar ingresos).
+//   · Donaciones en especie y beneficio (SUPPLY + BENEFIT): columna informativa;
+//     no suman al ingreso.
+// Se excluyen proyectos eliminados (soft delete). Cada año con movimientos
+// muestra sus 4 trimestres, aunque alguno venga en cero.
 const SQL = `
-  WITH donations AS (
-    SELECT
-      EXTRACT(YEAR    FROM pd.disbursement_date)::int AS year,
-      EXTRACT(QUARTER FROM pd.disbursement_date)::int AS quarter,
-      pd.donation_type                          AS don_type,
-      pd.amount                                 AS amount_cents
-    FROM caderh.project_donations pd
-    JOIN caderh.projects p ON p.id = pd.project_id AND p.project_status <> 'DELETED'
+  WITH proj AS (
+    SELECT id FROM caderh.projects WHERE project_status <> 'DELETED'
   ),
-  financing AS (
-    SELECT
-      EXTRACT(YEAR FROM pfs.disbursement_date)::int AS year,
-      pfs.amount                                AS amount_cents
-    FROM caderh.project_financing_sources pfs
-    JOIN caderh.projects p ON p.id = pfs.project_id AND p.project_status <> 'DELETED'
+  ingresos AS (
+    SELECT EXTRACT(YEAR FROM fecha)::int AS year, EXTRACT(QUARTER FROM fecha)::int AS quarter,
+           SUM(amount)::bigint AS cents
+    FROM (
+      SELECT pfs.disbursement_date AS fecha, pfs.amount
+      FROM caderh.project_financing_sources pfs JOIN proj ON proj.id = pfs.project_id
+      UNION ALL
+      SELECT pd.disbursement_date, pd.amount
+      FROM caderh.project_donations pd JOIN proj ON proj.id = pd.project_id
+      WHERE pd.donation_type = 'CASH'
+    ) x
+    GROUP BY 1, 2
   ),
-  by_year_quarter AS (
-    SELECT
-      year, quarter,
-      SUM(CASE WHEN don_type = 'CASH' THEN amount_cents ELSE 0 END)::bigint AS desembolsado_cents,
-      SUM(CASE WHEN don_type <> 'CASH' THEN amount_cents ELSE 0 END)::bigint AS total_donaciones_cents
-    FROM donations
-    WHERE ($1::int IS NULL OR year = $1)
-    GROUP BY year, quarter
+  gastos AS (
+    SELECT EXTRACT(YEAR FROM pe.expense_date)::int AS year, EXTRACT(QUARTER FROM pe.expense_date)::int AS quarter,
+           SUM(pe.amount)::bigint AS cents
+    FROM caderh.project_expenses pe
+    JOIN proj ON proj.id = pe.project_id
+    LEFT JOIN caderh.project_donations pdo ON pdo.id = pe.project_donation_id
+    WHERE pe.project_donation_id IS NULL OR pdo.donation_type = 'CASH'
+    GROUP BY 1, 2
   ),
-  presupuesto_total AS (
-    SELECT year, SUM(amount_cents)::bigint AS presupuesto_cents
-    FROM financing
-    WHERE ($1::int IS NULL OR year = $1)
-    GROUP BY year
+  especie AS (
+    SELECT EXTRACT(YEAR FROM pd.disbursement_date)::int AS year, EXTRACT(QUARTER FROM pd.disbursement_date)::int AS quarter,
+           SUM(pd.amount)::bigint AS cents
+    FROM caderh.project_donations pd JOIN proj ON proj.id = pd.project_id
+    WHERE pd.donation_type IN ('SUPPLY', 'BENEFIT')
+    GROUP BY 1, 2
+  ),
+  periodos AS (
+    SELECT a.year, q.quarter
+    FROM (SELECT year FROM ingresos UNION SELECT year FROM gastos UNION SELECT year FROM especie) a
+    CROSS JOIN generate_series(1, 4) AS q(quarter)
+    WHERE $1::int IS NULL OR a.year = $1
   )
   SELECT
-    bq.year, bq.quarter,
-    bq.desembolsado_cents, bq.total_donaciones_cents,
-    COALESCE(pt.presupuesto_cents, 0) AS presupuesto_cents
-  FROM by_year_quarter bq
-  LEFT JOIN presupuesto_total pt ON pt.year = bq.year
-  ORDER BY bq.year DESC, bq.quarter ASC
+    pr.year, pr.quarter,
+    COALESCE(i.cents, 0)::bigint AS ingresos_cents,
+    COALESCE(g.cents, 0)::bigint AS gastos_cents,
+    COALESCE(e.cents, 0)::bigint AS especie_cents,
+    SUM(COALESCE(i.cents, 0)) OVER w AS ingresos_acum_cents,
+    SUM(COALESCE(g.cents, 0)) OVER w AS gastos_acum_cents
+  FROM periodos pr
+  LEFT JOIN ingresos i ON i.year = pr.year AND i.quarter = pr.quarter
+  LEFT JOIN gastos   g ON g.year = pr.year AND g.quarter = pr.quarter
+  LEFT JOIN especie  e ON e.year = pr.year AND e.quarter = pr.quarter
+  WINDOW w AS (PARTITION BY pr.year ORDER BY pr.quarter)
+  ORDER BY pr.year DESC, pr.quarter ASC
 `;
 
-// % de ejecución financiera del período (criterio CADERH): gastos ejecutados
-// en efectivo ÷ ingresos recibidos en efectivo × 100. La especie queda fuera.
-// Gasto en efectivo = no imputado a una donación en especie/beneficio.
-// Fechas de negocio: ingresos por disbursement_date y gastos por expense_date
-// (created_dt es solo la fecha técnica de captura).
-const CASH_EXECUTION_SQL = `
-  SELECT
-    (
-      COALESCE((SELECT SUM(pfs.amount) FROM caderh.project_financing_sources pfs
-        JOIN caderh.projects p ON p.id = pfs.project_id AND p.project_status <> 'DELETED'
-        WHERE ($1::int IS NULL OR EXTRACT(YEAR FROM pfs.disbursement_date) = $1)), 0)
-      +
-      COALESCE((SELECT SUM(pd.amount) FROM caderh.project_donations pd
-        JOIN caderh.projects p ON p.id = pd.project_id AND p.project_status <> 'DELETED'
-        WHERE pd.donation_type = 'CASH'
-          AND ($1::int IS NULL OR EXTRACT(YEAR FROM pd.disbursement_date) = $1)), 0)
-    )::bigint AS ingresos_efectivo_cents,
-    COALESCE((SELECT SUM(pe.amount) FROM caderh.project_expenses pe
-      JOIN caderh.projects p ON p.id = pe.project_id AND p.project_status <> 'DELETED'
-      LEFT JOIN caderh.project_donations pdo ON pdo.id = pe.project_donation_id
-      WHERE (pe.project_donation_id IS NULL OR pdo.donation_type = 'CASH')
-        AND ($1::int IS NULL OR EXTRACT(YEAR FROM pe.expense_date) = $1)), 0)::bigint AS gastos_efectivo_cents
-`;
+// % de ejecución (fórmula oficial CADERH: gasto en efectivo ÷ ingreso en
+// efectivo × 100, sin tope). null = N/D: hay gasto pero aún no hay ingreso.
+const pctEjecucion = (gastosCents, ingresosCents) => {
+  if (ingresosCents > 0) return (gastosCents / ingresosCents) * 100;
+  return gastosCents > 0 ? null : 0;
+};
 
 export const handler = reportHandler(async (req) => {
   const year = req.query.year ? parseInt(req.query.year, 10) : null;
   const [rows] = await sequelize.query(SQL, { bind: [year] });
-  const [[cashExec]] = await sequelize.query(CASH_EXECUTION_SQL, { bind: [year] });
 
-  const out = rows.map((r) => {
-    const desembolsado = centsToLmps(r.desembolsado_cents);
-    const donaciones   = centsToLmps(r.total_donaciones_cents);
-    const presupuesto  = centsToLmps(r.presupuesto_cents);
-    return {
-      year: r.year,
-      quarter: `Q${r.quarter}`,
-      desembolsado,
-      donaciones,
-      granTotal: desembolsado + donaciones,
-      pctSobrePresupuesto: presupuesto > 0 ? (desembolsado / presupuesto) * 100 : 0,
-    };
-  });
+  const out = rows.map((r) => ({
+    year: r.year,
+    quarter: `Q${r.quarter}`,
+    ingresos: centsToLmps(r.ingresos_cents),
+    gastos: centsToLmps(r.gastos_cents),
+    pctEjecucionAcumulado: pctEjecucion(Number(r.gastos_acum_cents), Number(r.ingresos_acum_cents)),
+    donacionesEspecieBeneficio: centsToLmps(r.especie_cents),
+  }));
 
-  const totalDonaciones  = out.reduce((s, r) => s + r.donaciones,  0);
-  const granTotal        = out.reduce((s, r) => s + r.granTotal,   0);
+  // Totales en centavos para no arrastrar redondeos de punto flotante.
+  const sumCents = (key) => rows.reduce((s, r) => s + Number(r[key]), 0);
+  const ingresosCents = sumCents('ingresos_cents');
+  const gastosCents = sumCents('gastos_cents');
+  const especieCents = sumCents('especie_cents');
+  const pctPeriodo = pctEjecucion(gastosCents, ingresosCents);
 
-  const ingresosEfectivo = centsToLmps(cashExec?.ingresos_efectivo_cents ?? 0);
-  const gastosEfectivo   = centsToLmps(cashExec?.gastos_efectivo_cents ?? 0);
-
-  const kpis = {
-    ingresoPeriodo: granTotal,
-    pctEjecucionGlobal: ingresosEfectivo > 0 ? (gastosEfectivo / ingresosEfectivo) * 100 : 0,
-    donaciones: totalDonaciones,
-    granTotal,
+  return {
+    rows: out,
+    total: out.length,
+    kpis: {
+      ingresoPeriodo: centsToLmps(ingresosCents),
+      gastosPeriodo: centsToLmps(gastosCents),
+      pctEjecucionGlobal: pctPeriodo,
+      donacionesEspecieBeneficio: centsToLmps(especieCents),
+    },
+    totals: {
+      ingresos: centsToLmps(ingresosCents),
+      gastos: centsToLmps(gastosCents),
+      pctEjecucionAcumulado: pctPeriodo,
+      donacionesEspecieBeneficio: centsToLmps(especieCents),
+    },
   };
-
-  return { rows: out, total: out.length, kpis };
 });
