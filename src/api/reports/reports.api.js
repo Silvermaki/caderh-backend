@@ -121,15 +121,24 @@ router.post('/:reportId/export/pdf', async (req, res, next) => {
       title = reportId,
       subtitle,
       code,
+      // Filtros como los ve el usuario ("Proyecto: Nombre"), para el pie del
+      // PDF; `filters` lleva IDs y solo sirve para consultar.
+      filtersDisplay,
     } = req.body ?? {};
 
     // Replay the report handler against a synthetic request whose `query`
     // mirrors the filters payload. We capture the JSON response instead of
-    // letting it write to the wire.
+    // letting it write to the wire. page_size=all: el PDF lleva TODAS las
+    // filas del filtro, no la primera página (antes salían 25).
     let captured = null;
     let captureError = null;
+    const query = {};
+    for (const [k, v] of Object.entries(filters ?? {})) {
+      if (v === undefined || v === null || v === '') continue;
+      query[k] = Array.isArray(v) ? v.join(',') : v;
+    }
     const fakeReq = Object.assign(Object.create(Object.getPrototypeOf(req)), req, {
-      query: { ...filters },
+      query: { ...query, page: 1, page_size: 'all' },
       method: 'GET',
     });
     const fakeRes = {
@@ -151,6 +160,7 @@ router.post('/:reportId/export/pdf', async (req, res, next) => {
     }
 
     const rows = captured.payload?.rows ?? [];
+    const totals = captured.payload?.totals ?? null;
     const meta = captured.payload?.meta ?? {};
 
     const missingColumns = Array.isArray(columns)
@@ -163,7 +173,8 @@ router.post('/:reportId/export/pdf', async (req, res, next) => {
       code,
       columns,
       rows,
-      filtersApplied: filters,
+      totals,
+      filtersApplied: filtersDisplay && typeof filtersDisplay === 'object' ? filtersDisplay : filters,
       missingColumns: missingColumns.length > 0 ? missingColumns : (meta.missingColumns ?? []),
     });
 

@@ -5,6 +5,7 @@ import { router as supervisorApi } from './supervisor/supervisor.api.js';
 import { router as centrosApi } from './centros/centros.api.js';
 import { router as reportsApi } from './reports/reports.api.js';
 import { router as statsApi } from './stats/stats.api.js';
+import { router as egresadosApi } from './egresados/egresados.api.js';
 
 export const router = Router();
 
@@ -14,6 +15,7 @@ router.use("/supervisor", supervisorApi);
 router.use("/centros", centrosApi);
 router.use("/reports", reportsApi);
 router.use("/stats", statsApi);
+router.use("/egresados", egresadosApi);
 
 router.get('/', async (req, res) => {
     res.send("CADERH API server");

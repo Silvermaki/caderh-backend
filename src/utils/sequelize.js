@@ -637,7 +637,8 @@ export const sgc_estudiantes = sequelize.define('estudiantes', {
     ingreso_promedio: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     trabajado_ant: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     tiempo_ant: { type: DataTypes.TEXT, allowNull: true },
-    tipo_contrato_ant: { type: DataTypes.INTEGER, allowNull: true },
+    // TEXT desde la migración 1772350000000: Permanente, Temporal, Por eventos o Ninguno.
+    tipo_contrato_ant: { type: DataTypes.TEXT, allowNull: true },
     beneficios_empleo: { type: DataTypes.TEXT, allowNull: true },
     beneficios_empleo_otro: { type: DataTypes.TEXT, allowNull: true },
     autoempleo: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
@@ -648,6 +649,10 @@ export const sgc_estudiantes = sequelize.define('estudiantes', {
     horas_dia_trabajo: { type: DataTypes.TEXT, allowNull: true },
     socios: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     socios_cantidad: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+    // Migración 1772350000000: detalle libre de la discapacidad (obligatorio si
+    // es "Otra") y observaciones generales del joven.
+    discapacidad_detalle: { type: DataTypes.TEXT, allowNull: true },
+    observaciones: { type: DataTypes.TEXT, allowNull: true },
 }, { schema: "centros", tableName: "estudiantes", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
 
 sgc_estudiantes.belongsTo(sgc_centros, { foreignKey: 'centro_id', as: 'centro' });
@@ -721,7 +726,50 @@ export const sgc_proceso_matriculas = sequelize.define('proceso_matriculas', {
     estudiante_id: { type: DataTypes.INTEGER, allowNull: false },
     tipo_matricula: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 2 },
     estatus: { type: DataTypes.SMALLINT, allowNull: false, defaultValue: 1 },
+    // Cierre del curso (migración 1772360000000): EGRESADO | DESERTOR | NULL (sin cierre).
+    resultado: { type: DataTypes.TEXT, allowNull: true },
+    fecha_resultado: { type: DataTypes.DATEONLY, allowNull: true },
+    motivo_desercion: { type: DataTypes.TEXT, allowNull: true },
+    observacion_resultado: { type: DataTypes.TEXT, allowNull: true },
 }, { schema: "centros", tableName: "proceso_matriculas", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
+// Pasantía del egresado: 0 o 1 por matrícula (migración 1772360000000).
+export const sgc_pasantias = sequelize.define('pasantias', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    proceso_matricula_id: { type: DataTypes.INTEGER, allowNull: false, unique: true },
+    empresa: { type: DataTypes.TEXT, allowNull: true },
+    fecha_inicio: { type: DataTypes.DATEONLY, allowNull: true },
+    fecha_fin: { type: DataTypes.DATEONLY, allowNull: true },
+    // EN_CURSO | COMPLETADA | DESERTO
+    resultado: { type: DataTypes.TEXT, allowNull: false, defaultValue: 'EN_CURSO' },
+    motivo_desercion: { type: DataTypes.TEXT, allowNull: true },
+    porcentaje_avance: { type: DataTypes.INTEGER, allowNull: true },
+    beneficio: { type: DataTypes.TEXT, allowNull: true },
+    beneficio_otorgado_por: { type: DataTypes.TEXT, allowNull: true },
+    observaciones: { type: DataTypes.TEXT, allowNull: true },
+}, { schema: "centros", tableName: "pasantias", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
+
+// Seguimiento del egresado: un registro por matrícula y fecha de corte.
+export const sgc_seguimientos = sequelize.define('seguimientos', {
+    id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+    proceso_matricula_id: { type: DataTypes.INTEGER, allowNull: false },
+    fecha_corte: { type: DataTypes.DATEONLY, allowNull: false },
+    // Código de src/utils/egresados-catalogos.js (CHECK en la migración).
+    estatus: { type: DataTypes.TEXT, allowNull: false },
+    empresa: { type: DataTypes.TEXT, allowNull: true },
+    puesto: { type: DataTypes.TEXT, allowNull: true },
+    rango_salario: { type: DataTypes.TEXT, allowNull: true },
+    negocio: { type: DataTypes.TEXT, allowNull: true },
+    rubro: { type: DataTypes.TEXT, allowNull: true },
+    rango_ingreso: { type: DataTypes.TEXT, allowNull: true },
+    kit_entregado: { type: DataTypes.BOOLEAN, allowNull: true },
+    kit_monto_cents: { type: DataTypes.BIGINT, allowNull: true },
+    institucion: { type: DataTypes.TEXT, allowNull: true },
+    carrera: { type: DataTypes.TEXT, allowNull: true },
+    fecha_inicio: { type: DataTypes.DATEONLY, allowNull: true },
+    observaciones: { type: DataTypes.TEXT, allowNull: true },
+    registrado_por: { type: DataTypes.UUID, allowNull: true },
+}, { schema: "centros", tableName: "seguimientos", freezeTableName: true, timestamps: true, createdAt: 'created_at', updatedAt: 'updated_at' });
 
 sgc_proceso_matriculas.belongsTo(sgc_procesos, { foreignKey: 'proceso_id', as: 'proceso' });
 sgc_proceso_matriculas.belongsTo(sgc_estudiantes, { foreignKey: 'estudiante_id', as: 'estudiante' });

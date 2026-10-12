@@ -17,6 +17,8 @@ import {
 } from "../../utils/excel-centros.js";
 import { generateCentrosConsolidadoPdf } from "../../utils/pdf-centros.js";
 import { buildStudentPayload, normalizeDuracionHoras, normalizeDias, normalizeProcessDates } from "../../utils/normalize-captura.js";
+import { crearResolverEstudiante } from "../../utils/catalogos-estudiante.js";
+import { plano } from "../../utils/texto.js";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -414,10 +416,18 @@ router.post("/centros/wizard", verify_token, is_supervisor,
 
             // 3. Create courses with modules
             const courses = Array.isArray(b.courses) ? b.courses : [];
+            const areasCatalogo = courses.length > 0
+                ? await sgc_areas.findAll({ where: { estatus: 1 }, attributes: ["id", "nombre"], raw: true, transaction: t })
+                : [];
             for (const c of courses) {
                 try {
                     if (!c.nombre?.trim() || !c.codigo_programa?.trim() || !c.objetivo?.trim()) {
                         errors.push(`Curso "${c.nombre || "sin nombre"}": faltan campos requeridos`);
+                        continue;
+                    }
+                    const areaId = resolverArea(areasCatalogo, c.area_id, c.area);
+                    if (!areaId) {
+                        errors.push(`Curso "${c.nombre}": falta el área técnica o no existe en el catálogo`);
                         continue;
                     }
                     const course = await sgc_cursos.create({
@@ -430,6 +440,7 @@ router.post("/centros/wizard", verify_token, is_supervisor,
                         objetivo: c.objetivo.trim(),
                         estatus: 1,
                     }, { transaction: t });
+                    await setCursoArea(course.id, areaId, t);
 
                     const modules = Array.isArray(c.modules) ? c.modules : [];
                     for (const m of modules) {
@@ -482,10 +493,42 @@ router.post("/centros/wizard", verify_token, is_supervisor,
                 }
             }
 
-            // 5. Create students (normalización centralizada post-recaptura)
+            // 5. Create students (normalización centralizada post-recaptura).
+            // El Excel del wizard trae departamento y municipio por NOMBRE (o
+            // ID en plantillas viejas): se resuelven igual que en la carga masiva.
             const students = Array.isArray(b.students) ? b.students : [];
             const studentItems = [];
-            for (const s of students) {
+            const resolver = students.length > 0 ? crearResolverEstudiante(await loadCatalogosBase()) : null;
+            for (const raw of students) {
+                const s = { ...raw };
+                if (resolver && (s.departamento || s.municipio)) {
+                    const depto = resolver.departamento(s.departamento, s.departamento_id);
+                    const muni = depto.error ? depto : resolver.municipio(depto.value, s.municipio, s.municipio_id);
+                    if (depto.error || muni.error) {
+                        errors.push(`Estudiante "${s.identidad || "sin identidad"}": ${depto.error || muni.error}`);
+                        continue;
+                    }
+                    s.departamento_id = depto.value;
+                    s.municipio_id = muni.value;
+                }
+                // Nivel de escolaridad, discapacidad y etnia también por nombre.
+                if (resolver) {
+                    const catErrors = [];
+                    for (const [tipo, etiqueta, campo, campoId] of [
+                        ["nivel", "Nivel de escolaridad", "nivel_escolaridad", "nivel_escolaridad_id"],
+                        ["discapacidad", "Discapacidad", "discapacidad", "discapacidad_id"],
+                        ["etnia", "Etnia", "etnia", "etnia_id"],
+                    ]) {
+                        if (s[campo] === undefined || s[campo] === null || String(s[campo]).trim() === "") continue;
+                        const r = resolver.catalogo(tipo, etiqueta, s[campo], s[campoId]);
+                        if (r.error) catErrors.push(r.error);
+                        else s[campoId] = r.value;
+                    }
+                    if (catErrors.length > 0) {
+                        errors.push(`Estudiante "${s.identidad || "sin identidad"}": ${catErrors.join("; ")}`);
+                        continue;
+                    }
+                }
                 const { payload, errors: studentErrors } = buildStudentPayload(s);
                 const etiqueta = payload.identidad || (s.identidad ? String(s.identidad).trim() : "sin identidad");
                 if (!payload.nombres || !payload.apellidos || !payload.departamento_id || !payload.municipio_id || !payload.numero_dep) {
@@ -1129,6 +1172,86 @@ router.delete("/centros/:centroId/estudiantes/:id", verify_token, is_supervisor,
 
 // ─── Cursos CRUD ─────────────────────────────────────────────────────────────
 
+// Área técnica del curso (junction centros.curso_areas). La UI maneja UNA área
+// por curso; guardar reemplaza las anteriores. La piden la ficha técnica del
+// curso (Word del cliente), R1 · Consolidado matrícula por CFP y la AC-R-022.
+const CURSO_AREA_ID_SQL = `(SELECT ca.area_id FROM centros.curso_areas ca WHERE ca.curso_id = "cursos".id ORDER BY ca.id LIMIT 1)`;
+const CURSO_AREA_NOMBRE_SQL = `(SELECT a.nombre FROM centros.curso_areas ca JOIN centros.areas a ON a.id = ca.area_id WHERE ca.curso_id = "cursos".id ORDER BY ca.id LIMIT 1)`;
+
+async function areaActiva(areaId, transaction) {
+    const id = Number(areaId);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    const area = await sgc_areas.findOne({ where: { id, estatus: 1 }, attributes: ["id"], transaction });
+    return area ? id : null;
+}
+
+// Área por ID (formularios) o por nombre (Excel), contra el catálogo activo.
+function resolverArea(areasCatalogo, areaId, areaNombre) {
+    if (areaNombre !== undefined && areaNombre !== null && String(areaNombre).trim() !== "") {
+        const k = plano(areaNombre);
+        return areasCatalogo.find((a) => plano(a.nombre) === k)?.id ?? null;
+    }
+    const id = Number(areaId);
+    return areasCatalogo.find((a) => Number(a.id) === id)?.id ?? null;
+}
+
+async function setCursoArea(cursoId, areaId, transaction) {
+    await sequelize.query(`DELETE FROM centros.curso_areas WHERE curso_id = $1`, { bind: [cursoId], transaction });
+    await sequelize.query(
+        `INSERT INTO centros.curso_areas (curso_id, area_id, created_at, updated_at) VALUES ($1, $2, now(), now())`,
+        { bind: [cursoId, areaId], transaction }
+    );
+}
+
+// Código sugerido para un curso nuevo: el menor entero libre del centro
+// (activos e inactivos). No "máximo + 1": hay códigos sueltos como 2026.
+async function siguienteCodigoCurso(centroId) {
+    const [rows] = await sequelize.query(
+        `SELECT DISTINCT codigo FROM centros.cursos WHERE centro_id = $1 AND codigo > 0 ORDER BY codigo`,
+        { bind: [centroId] }
+    );
+    let next = 1;
+    for (const r of rows) {
+        if (Number(r.codigo) === next) next++;
+        else if (Number(r.codigo) > next) break;
+    }
+    return next;
+}
+
+// Código sugerido para un proceso nuevo: correlativo de 4 dígitos por centro
+// sobre los códigos puramente numéricos ("0001", "0002", …).
+async function siguienteCodigoProceso(centroId) {
+    const [rows] = await sequelize.query(
+        `SELECT COALESCE(MAX(codigo::int), 0) AS max FROM centros.procesos WHERE centro_id = $1 AND codigo ~ '^[0-9]{1,9}$'`,
+        { bind: [centroId] }
+    );
+    return String(Number(rows?.[0]?.max ?? 0) + 1).padStart(4, "0");
+}
+
+router.get("/centros/:centroId/cursos/next-code", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const centroId = Number(req.params.centroId);
+            if (!Number.isInteger(centroId)) return res.status(400).json({ message: "Centro inválido" });
+            res.status(200).json({ data: { codigo: await siguienteCodigoCurso(centroId) } });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
+router.get("/centros/:centroId/procesos/next-code", verify_token, is_authenticated,
+    async (req, res, next) => {
+        try {
+            const centroId = Number(req.params.centroId);
+            if (!Number.isInteger(centroId)) return res.status(400).json({ message: "Centro inválido" });
+            res.status(200).json({ data: { codigo: await siguienteCodigoProceso(centroId) } });
+        } catch (e) {
+            next(e);
+        }
+    }
+);
+
 router.get("/centros/:centroId/cursos", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
@@ -1154,6 +1277,8 @@ router.get("/centros/:centroId/cursos", verify_token, is_authenticated,
                 attributes: [
                     "id", "codigo", "nombre", "codigo_programa", "total_horas", "taller", "objetivo", "estatus", "created_at",
                     "departamento_id", "municipio_id", "comunidad",
+                    [sequelize.literal(CURSO_AREA_ID_SQL), "area_id"],
+                    [sequelize.literal(CURSO_AREA_NOMBRE_SQL), "area_nombre"],
                 ],
                 where,
                 order: sort ? [[sort, desc === "desc" ? "DESC" : "ASC"]] : [["nombre", "ASC"]],
@@ -1170,23 +1295,30 @@ router.get("/centros/:centroId/cursos", verify_token, is_authenticated,
 
 router.post("/centros/:centroId/cursos", verify_token, is_supervisor,
     async (req, res, next) => {
+        const t = await sequelize.transaction();
         try {
             const centroId = Number(req.params.centroId);
-            const { codigo, nombre, codigo_programa, total_horas, taller, objetivo, departamento_id, municipio_id } = req.body;
+            const { codigo, nombre, codigo_programa, total_horas, taller, objetivo, departamento_id, municipio_id, area_id } = req.body;
 
-            if (!nombre || !codigo_programa || !objetivo) {
-                return res.status(400).json({ message: "Faltan campos requeridos" });
+            if (!nombre || !codigo_programa || !objetivo || !area_id) {
+                await t.rollback();
+                return res.status(400).json({ message: "Faltan campos requeridos (nombre, código de programa, objetivo y área técnica)" });
             }
+            const areaId = await areaActiva(area_id, t);
+            if (!areaId) { await t.rollback(); return res.status(400).json({ message: "Área técnica no válida" }); }
 
             const curso = await sgc_cursos.create({
                 centro_id: centroId, codigo: codigo ? Number(codigo) : null, nombre: nombre.trim(), codigo_programa: codigo_programa.trim(),
                 total_horas: total_horas?.toString().trim() || '0', taller: taller ?? 1, objetivo: objetivo.trim(),
                 departamento_id: departamento_id || null, municipio_id: municipio_id || null, estatus: 1,
-            });
+            }, { transaction: t });
+            await setCursoArea(curso.id, areaId, t);
+            await t.commit();
 
             await user_logs.create({ user_id: req.user_id, log: `Creó curso ID: ${curso.id}, CENTRO: ${centroId}` });
             res.status(201).json({ ok: true, id: curso.id });
         } catch (e) {
+            await t.rollback();
             next(e);
         }
     }
@@ -1194,26 +1326,33 @@ router.post("/centros/:centroId/cursos", verify_token, is_supervisor,
 
 router.put("/centros/:centroId/cursos", verify_token, is_supervisor,
     async (req, res, next) => {
+        const t = await sequelize.transaction();
         try {
             const centroId = Number(req.params.centroId);
-            const { id, codigo, nombre, codigo_programa, total_horas, taller, objetivo, departamento_id, municipio_id } = req.body;
+            const { id, codigo, nombre, codigo_programa, total_horas, taller, objetivo, departamento_id, municipio_id, area_id } = req.body;
 
-            if (!id || !nombre || !codigo_programa || !objetivo) {
-                return res.status(400).json({ message: "Faltan campos requeridos" });
+            if (!id || !nombre || !codigo_programa || !objetivo || !area_id) {
+                await t.rollback();
+                return res.status(400).json({ message: "Faltan campos requeridos (nombre, código de programa, objetivo y área técnica)" });
             }
+            const areaId = await areaActiva(area_id, t);
+            if (!areaId) { await t.rollback(); return res.status(400).json({ message: "Área técnica no válida" }); }
 
-            const curso = await sgc_cursos.findOne({ where: { id, centro_id: centroId } });
-            if (!curso) return res.status(404).json({ message: "Curso no encontrado" });
+            const curso = await sgc_cursos.findOne({ where: { id, centro_id: centroId }, transaction: t });
+            if (!curso) { await t.rollback(); return res.status(404).json({ message: "Curso no encontrado" }); }
 
             await sgc_cursos.update({
                 codigo: codigo ? Number(codigo) : null, nombre: nombre.trim(), codigo_programa: codigo_programa.trim(),
                 total_horas: total_horas?.toString().trim() || '0', taller: taller ?? 1, objetivo: objetivo.trim(),
                 departamento_id: departamento_id || null, municipio_id: municipio_id || null,
-            }, { where: { id, centro_id: centroId } });
+            }, { where: { id, centro_id: centroId }, transaction: t });
+            await setCursoArea(Number(id), areaId, t);
+            await t.commit();
 
             await user_logs.create({ user_id: req.user_id, log: `Actualizó curso ID: ${id}, CENTRO: ${centroId}` });
             res.status(200).json({ ok: true });
         } catch (e) {
+            await t.rollback();
             next(e);
         }
     }
@@ -1248,6 +1387,7 @@ const STUDENT_ALL_FIELDS = [
     "trabajado_ant", "tiempo_ant", "tipo_contrato_ant", "beneficios_empleo", "beneficios_empleo_otro",
     "autoempleo", "autoempleo_dedicacion", "autoempleo_otro", "autoempleo_tiempo",
     "dias_semana_trabajo", "horas_dia_trabajo", "socios", "socios_cantidad",
+    "discapacidad_detalle", "observaciones",
 ];
 
 // La construcción/normalización del payload de estudiante vive en
@@ -1634,12 +1774,18 @@ router.get("/students/:studentId/enrollments", verify_token, is_authenticated,
 router.get("/courses", verify_token, is_authenticated,
     async (req, res, next) => {
         try {
-            const { limit, offset, sort, desc, search, centro_id, all } = req.query;
+            const { limit, offset, sort, desc, search, centro_id, area_id, all } = req.query;
 
             if (all === "true") {
+                // centro_id/centro_siglas: el filtro "Curso" de los reportes
+                // distingue cursos homónimos de distintos centros y se acota a
+                // los centros elegidos.
                 const rows = await sgc_cursos.findAll({
                     where: { estatus: 1, ...(centro_id ? { centro_id: Number(centro_id) } : {}) },
-                    attributes: ["id", "nombre"],
+                    attributes: [
+                        "id", "nombre", "centro_id",
+                        [sequelize.literal(`(SELECT COALESCE(NULLIF(c.siglas, ''), c.nombre) FROM centros.centros c WHERE c.id = "cursos".centro_id)`), "centro_siglas"],
+                    ],
                     order: [["nombre", "ASC"]],
                 });
                 return res.status(200).json({ data: rows });
@@ -1647,6 +1793,9 @@ router.get("/courses", verify_token, is_authenticated,
 
             if (!limit || limit > 100) return res.status(400).json({ message: "Faltan campos requeridos" });
 
+            const areaFilter = area_id && Number.isInteger(Number(area_id))
+                ? [sequelize.literal(`EXISTS (SELECT 1 FROM centros.curso_areas ca WHERE ca.curso_id = "cursos".id AND ca.area_id = ${Number(area_id)})`)]
+                : [];
             const where = {
                 estatus: 1,
                 ...(centro_id ? { centro_id: Number(centro_id) } : {}),
@@ -1657,12 +1806,15 @@ router.get("/courses", verify_token, is_authenticated,
                         sequelize.where(sequelize.cast(sequelize.col('"cursos"."codigo"'), 'TEXT'), { [Op.iLike]: `%${search}%` }),
                     ],
                 } : {}),
+                ...(areaFilter.length ? { [Op.and]: areaFilter } : {}),
             };
 
             const result = await sgc_cursos.findAndCountAll({
                 attributes: [
                     "id", "codigo", "centro_id", "nombre", "codigo_programa", "total_horas", "taller", "objetivo", "estatus",
                     [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "cursos".centro_id)`), "centro_nombre"],
+                    [sequelize.literal(CURSO_AREA_ID_SQL), "area_id"],
+                    [sequelize.literal(CURSO_AREA_NOMBRE_SQL), "area_nombre"],
                 ],
                 where,
                 order: sort ? [[sort, desc === "desc" ? "DESC" : "ASC"]] : [["nombre", "ASC"]],
@@ -1687,6 +1839,8 @@ router.get("/courses/:id", verify_token, is_authenticated,
                     "id", "codigo", "centro_id", "nombre", "codigo_programa", "total_horas", "taller", "objetivo",
                     "departamento_id", "municipio_id", "comunidad",
                     [sequelize.literal(`(SELECT c.nombre FROM centros.centros c WHERE c.id = "cursos".centro_id)`), "centro_nombre"],
+                    [sequelize.literal(CURSO_AREA_ID_SQL), "area_id"],
+                    [sequelize.literal(CURSO_AREA_NOMBRE_SQL), "area_nombre"],
                 ],
             });
             if (!course) return res.status(404).json({ message: "Curso no encontrado" });
@@ -1699,14 +1853,18 @@ router.get("/courses/:id", verify_token, is_authenticated,
 
 router.post("/courses", verify_token, is_supervisor,
     async (req, res, next) => {
+        const t = await sequelize.transaction();
         try {
             const b = req.body;
-            if (!b.centro_id || !b.nombre || !b.codigo_programa || !b.objetivo) {
-                return res.status(400).json({ message: "Faltan campos requeridos" });
+            if (!b.centro_id || !b.nombre || !b.codigo_programa || !b.objetivo || !b.area_id) {
+                await t.rollback();
+                return res.status(400).json({ message: "Faltan campos requeridos (centro, nombre, código de programa, objetivo y área técnica)" });
             }
+            const areaId = await areaActiva(b.area_id, t);
+            if (!areaId) { await t.rollback(); return res.status(400).json({ message: "Área técnica no válida" }); }
 
-            const centro = await sgc_centros.findOne({ where: { id: b.centro_id } });
-            if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
+            const centro = await sgc_centros.findOne({ where: { id: b.centro_id }, transaction: t });
+            if (!centro) { await t.rollback(); return res.status(404).json({ message: "Centro no encontrado" }); }
 
             const course = await sgc_cursos.create({
                 centro_id: Number(b.centro_id),
@@ -1719,11 +1877,14 @@ router.post("/courses", verify_token, is_supervisor,
                 departamento_id: null,
                 municipio_id: null,
                 estatus: 1,
-            });
+            }, { transaction: t });
+            await setCursoArea(course.id, areaId, t);
+            await t.commit();
 
             await user_logs.create({ user_id: req.user_id, log: `Creó curso ID: ${course.id}, CENTRO: ${b.centro_id}` });
             res.status(201).json({ ok: true, id: course.id });
         } catch (e) {
+            await t.rollback();
             next(e);
         }
     }
@@ -1731,14 +1892,18 @@ router.post("/courses", verify_token, is_supervisor,
 
 router.put("/courses", verify_token, is_supervisor,
     async (req, res, next) => {
+        const t = await sequelize.transaction();
         try {
             const b = req.body;
-            if (!b.id || !b.nombre || !b.codigo_programa || !b.objetivo) {
-                return res.status(400).json({ message: "Faltan campos requeridos" });
+            if (!b.id || !b.nombre || !b.codigo_programa || !b.objetivo || !b.area_id) {
+                await t.rollback();
+                return res.status(400).json({ message: "Faltan campos requeridos (nombre, código de programa, objetivo y área técnica)" });
             }
+            const areaId = await areaActiva(b.area_id, t);
+            if (!areaId) { await t.rollback(); return res.status(400).json({ message: "Área técnica no válida" }); }
 
-            const course = await sgc_cursos.findOne({ where: { id: b.id, estatus: 1 } });
-            if (!course) return res.status(404).json({ message: "Curso no encontrado" });
+            const course = await sgc_cursos.findOne({ where: { id: b.id, estatus: 1 }, transaction: t });
+            if (!course) { await t.rollback(); return res.status(404).json({ message: "Curso no encontrado" }); }
 
             await sgc_cursos.update({
                 codigo: b.codigo ? Number(b.codigo) : null,
@@ -1746,11 +1911,14 @@ router.put("/courses", verify_token, is_supervisor,
                 codigo_programa: b.codigo_programa.trim(),
                 taller: b.taller ?? 1,
                 objetivo: b.objetivo.trim(),
-            }, { where: { id: b.id } });
+            }, { where: { id: b.id }, transaction: t });
+            await setCursoArea(Number(b.id), areaId, t);
+            await t.commit();
 
             await user_logs.create({ user_id: req.user_id, log: `Actualizó curso ID: ${b.id}` });
             res.status(200).json({ ok: true });
         } catch (e) {
+            await t.rollback();
             next(e);
         }
     }
@@ -1885,10 +2053,12 @@ router.post("/courses/wizard", verify_token, is_supervisor,
         const t = await sequelize.transaction();
         try {
             const b = req.body;
-            if (!b.centro_id || !b.nombre || !b.codigo_programa || !b.objetivo) {
+            if (!b.centro_id || !b.nombre || !b.codigo_programa || !b.objetivo || !b.area_id) {
                 await t.rollback();
-                return res.status(400).json({ message: "Faltan campos requeridos del curso" });
+                return res.status(400).json({ message: "Faltan campos requeridos del curso (centro, nombre, código de programa, objetivo y área técnica)" });
             }
+            const areaId = await areaActiva(b.area_id, t);
+            if (!areaId) { await t.rollback(); return res.status(400).json({ message: "Área técnica no válida" }); }
 
             const centro = await sgc_centros.findOne({ where: { id: b.centro_id } });
             if (!centro) { await t.rollback(); return res.status(404).json({ message: "Centro no encontrado" }); }
@@ -1905,6 +2075,7 @@ router.post("/courses/wizard", verify_token, is_supervisor,
                 municipio_id: null,
                 estatus: 1,
             }, { transaction: t });
+            await setCursoArea(course.id, areaId, t);
 
             let modulesCreated = 0;
             const moduleErrors = [];
@@ -2083,6 +2254,10 @@ router.get("/processes", verify_token, is_authenticated,
                     [Op.or]: [
                         { nombre: { [Op.iLike]: `%${search}%` } },
                         { codigo: { [Op.iLike]: `%${search}%` } },
+                        // También por curso y centro: es como la gente busca un
+                        // proceso al vincularlo a un proyecto.
+                        sequelize.literal(`EXISTS (SELECT 1 FROM centros.cursos cu WHERE cu.id = "procesos".curso_id AND cu.nombre ILIKE ${sequelize.escape(`%${search}%`)})`),
+                        sequelize.literal(`EXISTS (SELECT 1 FROM centros.centros ce WHERE ce.id = "procesos".centro_id AND (ce.nombre ILIKE ${sequelize.escape(`%${search}%`)} OR ce.siglas ILIKE ${sequelize.escape(`%${search}%`)}))`),
                     ],
                 } : {}),
             };
@@ -2592,12 +2767,15 @@ router.delete("/processes/:id/projects/:projectId", verify_token, is_supervisor,
 // ═══════════════════════════════════════════════════════════════════════════
 
 async function loadCatalogosBase() {
-    const [departamentos, municipios, nivelEscolaridades] = await Promise.all([
+    const [departamentos, municipios, nivelEscolaridades, discapacidades, etnias, areas] = await Promise.all([
         sgc_departamentos.findAll({ where: { estatus: 1 }, attributes: ["id", "nombre"], order: [["nombre", "ASC"]], raw: true }),
         sgc_municipios.findAll({ where: { estatus: 1 }, attributes: ["id", "nombre", "departamento_id"], order: [["nombre", "ASC"]], raw: true }),
         sgc_nivel_escolaridads.findAll({ where: { estatus: 1 }, attributes: ["id", "nombre"], order: [["nombre", "ASC"]], raw: true }),
+        sgc_discapacidads.findAll({ where: { estatus: 1 }, attributes: ["id", "nombre"], order: [["id", "ASC"]], raw: true }),
+        sgc_etnias.findAll({ where: { estatus: 1 }, attributes: ["id", "nombre"], order: [["nombre", "ASC"]], raw: true }),
+        sgc_areas.findAll({ where: { estatus: 1 }, attributes: ["id", "nombre"], order: [["nombre", "ASC"]], raw: true }),
     ]);
-    return { departamentos, municipios, nivelEscolaridades };
+    return { departamentos, municipios, nivelEscolaridades, discapacidades, etnias, areas };
 }
 
 // ─── Excel: Instructores ────────────────────────────────────────────────────
@@ -2734,11 +2912,11 @@ router.post("/centros/:centroId/excel/students", verify_token, is_supervisor, ex
             if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
             if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
 
-            const { parsed, errors } = parseStudentsExcel(req.file.buffer);
-
-            const allMunicipios = await sgc_municipios.findAll({ where: { estatus: 1 }, attributes: ["id", "departamento_id"], raw: true });
-            const munDeptErrors = validateMunicipioDepartamento(parsed, allMunicipios);
-            munDeptErrors.forEach((e) => errors.push({ row: null, message: e.message }));
+            // Catálogos por nombre (o ID de plantillas viejas); el resolver ya
+            // valida que el municipio pertenezca al departamento de la fila.
+            const catalogs = await loadCatalogosBase();
+            const { parsed, errors } = parseStudentsExcel(req.file.buffer, crearResolverEstudiante(catalogs));
+            const munDeptErrors = [];
 
             const existingRows = await sgc_estudiantes.findAll({
                 where: { centro_id: centroId, estatus: 1 },
@@ -2901,7 +3079,11 @@ router.get("/centros/:centroId/excel/courses", verify_token, is_authenticated,
             const centro = await sgc_centros.findOne({ where: { id: centroId } });
             if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
 
-            const rows = await sgc_cursos.findAll({ where: { centro_id: centroId, estatus: 1 }, raw: true });
+            const rows = await sgc_cursos.findAll({
+                where: { centro_id: centroId, estatus: 1 },
+                attributes: { include: [[sequelize.literal(CURSO_AREA_NOMBRE_SQL), "area_nombre"]] },
+                raw: true,
+            });
             const catalogs = await loadCatalogosBase();
 
             const protectedRows = await sgc_procesos.findAll({
@@ -2929,7 +3111,21 @@ router.post("/centros/:centroId/excel/courses", verify_token, is_supervisor, exc
             if (!centro) return res.status(404).json({ message: "Centro no encontrado" });
             if (!req.file) return res.status(400).json({ message: "Archivo requerido" });
 
-            const { parsed, errors } = parseCoursesExcel(req.file.buffer);
+            const { parsed: parsedRaw, errors } = parseCoursesExcel(req.file.buffer);
+
+            // Área técnica por nombre (obligatoria). Filas con área inválida no
+            // se importan; el resto conserva el comportamiento de siempre.
+            const areasCatalogo = await sgc_areas.findAll({ where: { estatus: 1 }, attributes: ["id", "nombre"], raw: true });
+            const parsed = [];
+            for (const row of parsedRaw) {
+                const areaId = resolverArea(areasCatalogo, null, row.area_nombre);
+                if (!areaId) {
+                    errors.push({ row: row._row, message: `Área técnica "${row.area_nombre}" no existe en el catálogo` });
+                    continue;
+                }
+                const { area_nombre, _row, ...data } = row;
+                parsed.push({ ...data, _areaId: areaId });
+            }
 
             const existingRows = await sgc_cursos.findAll({ where: { centro_id: centroId, estatus: 1 }, attributes: ["id"], raw: true });
             const existingIds = new Set(existingRows.map((r) => r.id));
@@ -2945,25 +3141,39 @@ router.post("/centros/:centroId/excel/courses", verify_token, is_supervisor, exc
             let created = 0, updated = 0, deleted = 0;
             const warnings = [];
 
-            for (const existing of existingRows) {
-                if (!excelIds.has(existing.id)) {
-                    if (protectedIds.has(existing.id)) {
-                        warnings.push({ id: existing.id, message: `Curso ID ${existing.id} está protegido (tiene procesos asignados) y no fue eliminado` });
-                    } else {
-                        await sgc_cursos.update({ estatus: 0 }, { where: { id: existing.id, centro_id: centroId } });
-                        deleted++;
+            // Sincronización destructiva SOLO con archivo limpio (mismo criterio
+            // que la importación de estudiantes): una fila con error no está en
+            // `parsed`, y dar de baja su curso "por ausencia" destruiría datos
+            // por un error de formato (p. ej. una plantilla vieja sin el área).
+            if (errors.length > 0) {
+                const ausentes = existingRows.filter((r) => !excelIds.has(r.id)).length;
+                if (ausentes > 0) {
+                    warnings.push({ id: null, message: `El archivo tiene ${errors.length} error(es): no se dio de baja ningún curso existente. Corrija los errores y vuelva a importar para sincronizar.` });
+                }
+            } else {
+                for (const existing of existingRows) {
+                    if (!excelIds.has(existing.id)) {
+                        if (protectedIds.has(existing.id)) {
+                            warnings.push({ id: existing.id, message: `Curso ID ${existing.id} está protegido (tiene procesos asignados) y no fue eliminado` });
+                        } else {
+                            await sgc_cursos.update({ estatus: 0 }, { where: { id: existing.id, centro_id: centroId } });
+                            deleted++;
+                        }
                     }
                 }
             }
 
             for (const row of parsed) {
                 try {
-                    if (row.id && existingIds.has(row.id)) {
-                        const { id, ...data } = row;
+                    const { _areaId, ...fields } = row;
+                    if (fields.id && existingIds.has(fields.id)) {
+                        const { id, ...data } = fields;
                         await sgc_cursos.update(data, { where: { id, centro_id: centroId } });
+                        await setCursoArea(id, _areaId);
                         updated++;
                     } else {
-                        await sgc_cursos.create({ ...row, id: undefined, centro_id: centroId, estatus: 1 });
+                        const curso = await sgc_cursos.create({ ...fields, id: undefined, centro_id: centroId, estatus: 1 });
+                        await setCursoArea(curso.id, _areaId);
                         created++;
                     }
                 } catch (err) {

@@ -4,7 +4,7 @@ import { buildStudentPayload, normalizeIdentidad, normalizeDuracionHoras, normal
 
 // ─── Styles ─────────────────────────────────────────────────────────────────
 
-function createStyles(wb) {
+export function createStyles(wb) {
     return {
         header: wb.createStyle({
             font: { bold: true, size: 11, color: "FFFFFF" },
@@ -58,7 +58,7 @@ function createStyles(wb) {
     };
 }
 
-function writeCell(ws, row, col, value, style) {
+export function writeCell(ws, row, col, value, style) {
     if (value === null || value === undefined) {
         ws.cell(row, col).string("").style(style);
     } else if (typeof value === "number") {
@@ -68,7 +68,7 @@ function writeCell(ws, row, col, value, style) {
     }
 }
 
-function writeCatalogSheet(wb, styles, name, headers, rows, widths) {
+export function writeCatalogSheet(wb, styles, name, headers, rows, widths) {
     const ws = wb.addWorksheet(name);
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(styles.catalogHeader));
     widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
@@ -168,6 +168,25 @@ export function generateInstructorsExcel(rows, catalogs, protectedIds) {
 // GENERATE: Estudiantes
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Lista desplegable de Excel sobre una columna (filas 2..maxRow). `formula`
+// puede ser una lista literal "a,b,c" (sin comas dentro de los valores) o una
+// referencia "=Hoja!$A$2:$A$20".
+export function addListValidation(ws, col, formula, maxRow = 3000) {
+    const letter = xl.getExcelAlpha(col);
+    ws.addDataValidation({
+        type: "list",
+        allowBlank: true,
+        showDropDown: true,
+        sqref: `${letter}2:${letter}${maxRow}`,
+        formulas: [formula],
+    });
+}
+
+const TIPO_CONTRATO_OPTIONS = ["Permanente", "Temporal", "Por eventos", "Ninguno"];
+
+// Plantilla de estudiantes: los catálogos se escriben por NOMBRE (notas CADERH
+// 18/08/2026: "la subida masiva pide código de departamento y municipio").
+// La importación también acepta los IDs de plantillas anteriores.
 export function generateStudentsExcel(rows, catalogs, protectedIds) {
     const protSet = new Set(protectedIds ?? []);
     const wb = new xl.Workbook();
@@ -177,13 +196,15 @@ export function generateStudentsExcel(rows, catalogs, protectedIds) {
     const deptMap = Object.fromEntries((catalogs.departamentos ?? []).map((d) => [d.id, d.nombre]));
     const munMap = Object.fromEntries((catalogs.municipios ?? []).map((m) => [m.id, m.nombre]));
     const neMap = Object.fromEntries((catalogs.nivelEscolaridades ?? []).map((n) => [n.id, n.nombre]));
+    const discMap = Object.fromEntries((catalogs.discapacidades ?? []).map((d) => [d.id, d.nombre]));
+    const etniaMap = Object.fromEntries((catalogs.etnias ?? []).map((e) => [e.id, e.nombre]));
 
     const headers = [
         "ID", "Protegido", "Identidad*", "Nombres*", "Apellidos*", "Sexo*", "Estado Civil",
         "Fecha Nacimiento", "Tipo Sangre",
-        "Departamento ID*", "Departamento", "Municipio ID*", "Municipio", "Direccion",
+        "Departamento*", "Municipio*", "Direccion",
         "Email", "Telefono", "Celular", "Facebook", "Instagram", "Twitter",
-        "Estudia", "Nivel Escolaridad ID", "Nivel Escolaridad",
+        "Estudia", "Nivel Escolaridad",
         "Vive*", "Num. Dependientes*",
         "Tiene Hijos", "Cuantos Hijos", "Vivienda", "Cant. Viven", "Cant. Trabajan", "Cant. No Trabajan", "Ingreso Promedio",
         "Trabajo Actual", "Donde Trabaja", "Puesto",
@@ -191,26 +212,28 @@ export function generateStudentsExcel(rows, catalogs, protectedIds) {
         "Beneficios Empleo", "Beneficios Empleo Otro",
         "Autoempleo", "Autoempleo Dedicacion", "Autoempleo Otro", "Autoempleo Tiempo",
         "Dias Semana Trabajo", "Horas Dia Trabajo", "Socios", "Socios Cantidad",
-        "Especial", "Discapacidad ID", "Etnia ID", "Interno",
+        "Especial", "Discapacidad", "Detalle Discapacidad", "Etnia", "Interno",
         "Nombre Ref.", "Telefono Ref.", "Datos Ref.", "Parentesco Ref.", "Adicional Ref.",
+        "Observaciones",
     ];
     const widths = [
         10, 12, 18, 22, 22, 10, 16, 16, 14,
-        16, 22, 14, 22, 30,
+        22, 24, 30,
         25, 16, 16, 20, 20, 20,
-        10, 18, 22,
+        10, 24,
         14, 16,
         12, 14, 14, 12, 14, 16, 16,
         14, 20, 20,
-        14, 14, 16,
+        14, 14, 18,
         20, 20,
         12, 20, 20, 16,
         18, 16, 10, 14,
-        10, 16, 10, 10,
+        10, 24, 28, 18, 10,
         22, 16, 20, 16, 20,
+        40,
     ];
-    const refCols = new Set([10, 12, 22]); // Departamento name, Municipio name, Nivel Escolaridad name
-    const requiredCols = new Set([2, 3, 4, 5, 9, 11, 23, 24]);
+    const refCols = new Set(); // los catálogos se editan por nombre
+    const requiredCols = new Set([2, 3, 4, 5, 9, 10, 20, 21]);
 
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(requiredCols.has(i) ? s.headerRequired : s.header));
     widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
@@ -226,21 +249,22 @@ export function generateStudentsExcel(rows, catalogs, protectedIds) {
         const vals = [
             r.id, isProt ? "SI" : "", r.identidad, r.nombres, r.apellidos,
             r.sexo, r.estado_civil, r.fecha_nacimiento || "", r.sangre || "",
-            r.departamento_id, deptMap[r.departamento_id] ?? "", r.municipio_id, munMap[r.municipio_id] ?? "",
+            deptMap[r.departamento_id] ?? "", munMap[r.municipio_id] ?? "",
             r.direccion || "",
             r.email || "", r.telefono || "", r.celular || "",
             r.facebook || "", r.instagram || "", r.twitter || "",
-            r.estudia ?? 0, r.nivel_escolaridad_id ?? "", neMap[r.nivel_escolaridad_id] ?? "",
+            r.estudia ?? 0, neMap[r.nivel_escolaridad_id] ?? "",
             r.vive || "", r.numero_dep || "",
             r.tiene_hijos ?? 0, r.cuantos_hijos ?? 0, r.vivienda || "",
             r.cantidad_viven ?? 0, r.cantidad_trabajan_viven ?? 0, r.cantidad_notrabajan_viven ?? 0, r.ingreso_promedio ?? 0,
             r.trabajo_actual ?? 0, r.donde_trabaja || "", r.puesto || "",
-            r.trabajado_ant ?? 0, r.tiempo_ant || "", r.tipo_contrato_ant ?? "",
+            r.trabajado_ant ?? 0, r.tiempo_ant || "", r.tipo_contrato_ant || "",
             r.beneficios_empleo || "", r.beneficios_empleo_otro || "",
             r.autoempleo ?? 0, r.autoempleo_dedicacion || "", r.autoempleo_otro || "", r.autoempleo_tiempo || "",
             r.dias_semana_trabajo || "", r.horas_dia_trabajo || "", r.socios ?? 0, r.socios_cantidad ?? 0,
-            r.especial ?? 0, r.discapacidad_id || "", r.etnia_id || "", r.interno ?? 0,
+            r.especial ?? 0, discMap[r.discapacidad_id] ?? "", r.discapacidad_detalle || "", etniaMap[r.etnia_id] ?? "", r.interno ?? 0,
             r.nombre_r || "", r.telefono_r || "", r.datos_r || "", r.parentesco_r || "", r.adicional_r || "",
+            r.observaciones || "",
         ];
 
         vals.forEach((val, col) => {
@@ -254,14 +278,36 @@ export function generateStudentsExcel(rows, catalogs, protectedIds) {
         });
     });
 
-    // Catalog sheets
-    writeCatalogSheet(wb, s, "Departamentos", ["ID", "Nombre"], (catalogs.departamentos ?? []).map((d) => [d.id, d.nombre]), [10, 30]);
-    writeCatalogSheet(wb, s, "Municipios", ["ID", "Nombre", "Departamento ID"], (catalogs.municipios ?? []).map((m) => [m.id, m.nombre, m.departamento_id]), [10, 30, 16]);
-    writeCatalogSheet(wb, s, "Niveles Escolaridad", ["ID", "Nombre"], (catalogs.nivelEscolaridades ?? []).map((n) => [n.id, n.nombre]), [10, 30]);
+    // Catálogos por nombre (las columnas de la hoja principal llevan lista
+    // desplegable apuntando a estas hojas).
+    const departamentos = catalogs.departamentos ?? [];
+    const municipios = [...(catalogs.municipios ?? [])].sort((a, b) =>
+        String(deptMap[a.departamento_id] ?? "").localeCompare(String(deptMap[b.departamento_id] ?? ""), "es")
+        || String(a.nombre).localeCompare(String(b.nombre), "es"));
+    const niveles = catalogs.nivelEscolaridades ?? [];
+    const discapacidades = catalogs.discapacidades ?? [];
+    const etnias = catalogs.etnias ?? [];
+    writeCatalogSheet(wb, s, "Departamentos", ["Departamento"], departamentos.map((d) => [d.nombre]), [30]);
+    writeCatalogSheet(wb, s, "Municipios", ["Departamento", "Municipio"], municipios.map((m) => [deptMap[m.departamento_id] ?? "", m.nombre]), [26, 30]);
+    writeCatalogSheet(wb, s, "Niveles Escolaridad", ["Nivel Escolaridad"], niveles.map((n) => [n.nombre]), [30]);
+    writeCatalogSheet(wb, s, "Discapacidades", ["Discapacidad"], discapacidades.map((d) => [d.nombre]), [30]);
+    writeCatalogSheet(wb, s, "Etnias", ["Etnia"], etnias.map((e) => [e.nombre]), [30]);
     writeCatalogSheet(wb, s, "Catalogo Sexo", ["Valor", "Descripcion"], SEXO_OPTIONS.map((o) => [o.value, o.label]), [10, 20]);
     writeCatalogSheet(wb, s, "Catalogo Estado Civil", ["Valor"], ESTADO_CIVIL_OPTIONS.map((o) => [o.value]), [20]);
     writeCatalogSheet(wb, s, "Catalogo Vive", ["Valor"], VIVE_OPTIONS.map((v) => [v]), [20]);
     writeCatalogSheet(wb, s, "Catalogo Si-No", ["Valor", "Descripcion"], SI_NO_OPTIONS.map((o) => [o.value, o.label]), [10, 16]);
+    writeCatalogSheet(wb, s, "Catalogo Tipo Contrato", ["Valor"], TIPO_CONTRATO_OPTIONS.map((v) => [v]), [20]);
+
+    // Listas desplegables (columnas 1-based).
+    const colOf = (header) => headers.indexOf(header) + 1;
+    if (departamentos.length) addListValidation(ws, colOf("Departamento*"), `=Departamentos!$A$2:$A$${departamentos.length + 1}`);
+    if (municipios.length) addListValidation(ws, colOf("Municipio*"), `=Municipios!$B$2:$B$${municipios.length + 1}`);
+    if (niveles.length) addListValidation(ws, colOf("Nivel Escolaridad"), `=${"'Niveles Escolaridad'"}!$A$2:$A$${niveles.length + 1}`);
+    if (discapacidades.length) addListValidation(ws, colOf("Discapacidad"), `=Discapacidades!$A$2:$A$${discapacidades.length + 1}`);
+    if (etnias.length) addListValidation(ws, colOf("Etnia"), `=Etnias!$A$2:$A$${etnias.length + 1}`);
+    addListValidation(ws, colOf("Sexo*"), "M,F");
+    addListValidation(ws, colOf("Vive*"), VIVE_OPTIONS.join(","));
+    addListValidation(ws, colOf("Tipo Contrato Ant."), TIPO_CONTRATO_OPTIONS.join(","));
 
     return wb;
 }
@@ -277,12 +323,12 @@ export function generateCoursesExcel(rows, catalogs, protectedIds) {
     const ws = wb.addWorksheet("Cursos");
 
     const headers = [
-        "ID", "Protegido", "Codigo", "Nombre*", "Codigo Programa*", "Taller",
+        "ID", "Protegido", "Codigo", "Nombre*", "Codigo Programa*", "Area Tecnica*", "Taller",
         "Total Horas", "Objetivo*",
     ];
-    const widths = [10, 12, 12, 30, 18, 10, 14, 40];
-    const refCols = new Set([6]); // Total Horas (readonly)
-    const requiredCols = new Set([3, 4, 7]);
+    const widths = [10, 12, 12, 30, 18, 28, 10, 14, 40];
+    const refCols = new Set([7]); // Total Horas (readonly)
+    const requiredCols = new Set([3, 4, 5, 8]);
 
     headers.forEach((h, i) => ws.cell(1, i + 1).string(h).style(requiredCols.has(i) ? s.headerRequired : s.header));
     widths.forEach((w, i) => ws.column(i + 1).setWidth(w));
@@ -297,7 +343,7 @@ export function generateCoursesExcel(rows, catalogs, protectedIds) {
 
         const vals = [
             r.id, isProt ? "SI" : "", r.codigo, r.nombre, r.codigo_programa,
-            r.taller ?? 1, r.total_horas || "", r.objetivo || "",
+            r.area_nombre || "", r.taller ?? 1, r.total_horas || "", r.objetivo || "",
         ];
 
         vals.forEach((val, col) => {
@@ -312,6 +358,9 @@ export function generateCoursesExcel(rows, catalogs, protectedIds) {
     });
 
     writeCatalogSheet(wb, s, "Catalogo Taller", ["Valor", "Descripcion"], [[0, "No"], [1, "Si"]], [10, 16]);
+    const areas = catalogs.areas ?? [];
+    writeCatalogSheet(wb, s, "Areas Tecnicas", ["Área técnica"], areas.map((a) => [a.nombre]), [36]);
+    if (areas.length) addListValidation(ws, headers.indexOf("Area Tecnica*") + 1, `='Areas Tecnicas'!$A$2:$A$${areas.length + 1}`);
 
     return wb;
 }
@@ -392,7 +441,7 @@ export function generateProcessesExcel(rows, catalogs, protectedIds) {
 // PARSE helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-function readFirstSheet(buffer) {
+export function readFirstSheet(buffer) {
     const workbook = XLSX.read(buffer, { type: "buffer" });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
@@ -454,7 +503,10 @@ export function parseInstructorsExcel(buffer) {
 // PARSE: Estudiantes
 // ═══════════════════════════════════════════════════════════════════════════
 
-export function parseStudentsExcel(buffer) {
+// `resolver` (src/utils/catalogos-estudiante.js) traduce los NOMBRES de
+// departamento, municipio y catálogos a sus IDs; también acepta los IDs de
+// plantillas anteriores.
+export function parseStudentsExcel(buffer, resolver) {
     const jsonRows = readFirstSheet(buffer);
     const parsed = [];
     const errors = [];
@@ -473,10 +525,26 @@ export function parseStudentsExcel(buffer) {
         if (!apellidos) { errors.push({ row: rowNum, message: "Apellidos es requerido" }); return; }
         if (!sexo) { errors.push({ row: rowNum, message: "Sexo es requerido" }); return; }
 
-        const departamento_id = intOrNull(row["Departamento ID"]);
-        const municipio_id = intOrNull(row["Municipio ID"]);
-        if (!departamento_id) { errors.push({ row: rowNum, message: "Departamento ID es requerido" }); return; }
-        if (!municipio_id) { errors.push({ row: rowNum, message: "Municipio ID es requerido" }); return; }
+        const depto = resolver.departamento(row["Departamento"], row["Departamento ID"]);
+        if (depto.error) { errors.push({ row: rowNum, message: depto.error }); return; }
+        const muni = resolver.municipio(depto.value, row["Municipio"], row["Municipio ID"]);
+        if (muni.error) { errors.push({ row: rowNum, message: muni.error }); return; }
+        const departamento_id = depto.value;
+        const municipio_id = muni.value;
+
+        const catalogErrors = [];
+        const fromCatalog = (tipo, etiqueta, nombreCol, idCol) => {
+            const r = resolver.catalogo(tipo, etiqueta, row[nombreCol], row[idCol]);
+            if (r.error) catalogErrors.push(r.error);
+            return r.value ?? null;
+        };
+        const nivel_escolaridad_id = fromCatalog("nivel", "Nivel de escolaridad", "Nivel Escolaridad", "Nivel Escolaridad ID");
+        const discapacidad_id = fromCatalog("discapacidad", "Discapacidad", "Discapacidad", "Discapacidad ID");
+        const etnia_id = fromCatalog("etnia", "Etnia", "Etnia", "Etnia ID");
+        if (catalogErrors.length > 0) {
+            catalogErrors.forEach((message) => errors.push({ row: rowNum, message }));
+            return;
+        }
 
         const vive = strOrNull(row["Vive"]);
         const numero_dep = strOrNull(row["Num. Dependientes"]);
@@ -496,7 +564,7 @@ export function parseStudentsExcel(buffer) {
             email: strOrNull(row["Email"]), telefono: strOrNull(row["Telefono"]), celular: strOrNull(row["Celular"]),
             facebook: strOrNull(row["Facebook"]), instagram: strOrNull(row["Instagram"]), twitter: strOrNull(row["Twitter"]),
             estudia: intOrZero(row["Estudia"]),
-            nivel_escolaridad_id: row["Nivel Escolaridad ID"],
+            nivel_escolaridad_id,
             vive, numero_dep,
             tiene_hijos: intOrZero(row["Tiene Hijos"]), cuantos_hijos: intOrZero(row["Cuantos Hijos"]),
             vivienda: strOrNull(row["Vivienda"]),
@@ -508,7 +576,7 @@ export function parseStudentsExcel(buffer) {
             donde_trabaja: strOrNull(row["Donde Trabaja"]), puesto: strOrNull(row["Puesto"]),
             trabajado_ant: intOrZero(row["Trabajado Ant."]),
             tiempo_ant: strOrNull(row["Tiempo Ant."]),
-            tipo_contrato_ant: intOrNull(row["Tipo Contrato Ant."]),
+            tipo_contrato_ant: strOrNull(row["Tipo Contrato Ant."]),
             beneficios_empleo: strOrNull(row["Beneficios Empleo"]),
             beneficios_empleo_otro: strOrNull(row["Beneficios Empleo Otro"]),
             autoempleo: intOrZero(row["Autoempleo"]),
@@ -519,15 +587,19 @@ export function parseStudentsExcel(buffer) {
             horas_dia_trabajo: strOrNull(row["Horas Dia Trabajo"]),
             socios: intOrZero(row["Socios"]), socios_cantidad: intOrZero(row["Socios Cantidad"]),
             especial: intOrZero(row["Especial"]),
-            discapacidad_id: row["Discapacidad ID"],
+            discapacidad_id,
             // riesgo_social ya no se parsea (sin la clave en el objeto,
             // buildStudentPayload no lo incluye): la columna se quitó de la
             // plantilla y así el import no pisa el valor histórico.
-            etnia_id: row["Etnia ID"],
+            etnia_id,
             interno: intOrZero(row["Interno"]),
             nombre_r: strOrNull(row["Nombre Ref."]), telefono_r: strOrNull(row["Telefono Ref."]),
             datos_r: strOrNull(row["Datos Ref."]), parentesco_r: strOrNull(row["Parentesco Ref."]),
             adicional_r: strOrNull(row["Adicional Ref."]),
+            // Columnas nuevas: solo se pasan si existen en el archivo, para que
+            // una plantilla anterior no borre lo ya capturado.
+            ...("Detalle Discapacidad" in row ? { discapacidad_detalle: row["Detalle Discapacidad"] } : {}),
+            ...("Observaciones" in row ? { observaciones: row["Observaciones"] } : {}),
         });
 
         if (rowErrors.length > 0) {
@@ -562,15 +634,19 @@ export function parseCoursesExcel(buffer) {
         if (!nombre) { errors.push({ row: rowNum, message: "Nombre es requerido" }); return; }
         if (!codigo_programa) { errors.push({ row: rowNum, message: "Codigo Programa es requerido" }); return; }
         if (!objetivo) { errors.push({ row: rowNum, message: "Objetivo es requerido" }); return; }
+        const area_nombre = strOrNull(row["Area Tecnica"]);
+        if (!area_nombre) { errors.push({ row: rowNum, message: "Área técnica es requerida" }); return; }
 
         // No se parsean departamento/municipio/comunidad: la plantilla de cursos
         // de un CFP ya no incluye esas columnas, y omitirlas aquí evita que una
         // importación borre los valores existentes en cursos ya registrados.
+        // area_nombre y _row los resuelve/consume la ruta (no son columnas).
         parsed.push({
             id,
             codigo: (codigo !== "" && codigo !== null && codigo !== undefined) ? (Number.isInteger(Number(codigo)) ? Number(codigo) : codigo) : null,
             nombre, codigo_programa,
             taller: taller ?? 1, objetivo,
+            area_nombre, _row: rowNum,
         });
     });
 

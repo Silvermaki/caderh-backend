@@ -1,252 +1,179 @@
 import { sequelize } from '../../../utils/sequelize.js';
-import { reportHandler, parsePagination } from '../shared.js';
+import {
+  reportHandler, parsePagination, parseUuidList, parseIntList, parseIntValue, parseIsoDate, parseEnumList, GENERO_SQL,
+} from '../shared.js';
+import { ESTATUS_SEGUIMIENTO } from '../../../utils/egresados-catalogos.js';
 
-// R2: Listado detallado de jóvenes (paged).
-// Mismos filtros que R1: project, cftp, financingSource, technicalArea, city,
-// year, quarter (calendario), age range, gender.
+// R2 · Listado detallado de estudiantes (paginado en el servidor).
 //
-// Cada fila = (estudiante, proceso). Si un joven está en múltiples procesos
-// aparece múltiples veces — cada matrícula tiene su contexto (proyecto, fuente,
-// año, trimestre, edad-en-ese-momento) distinto.
+// Una fila por matrícula (estudiante × proceso): la base del Anexo I del
+// cliente. Muestra lo que captura el formulario del estudiante (el UI dicta
+// qué campos están vigentes), el resultado del curso y el último estatus de
+// seguimiento. Los datos laborales del formulario son de la INSCRIPCIÓN.
 //
-// Schema notes (post-recaptura):
-//   - centros.estudiantes.fecha_nacimiento es DATE real (CHECK de rango en
-//     captura): la edad se calcula con AGE directo, sin guard de regex.
-//   - centros.estudiantes.sexo es canónico 'M'/'F'; la normalización con CASE
-//     tolera variantes heredadas y se mapea a 'Masculino'/'Femenino' para display.
-//   - centro mostrado = el centro del proceso (no el centro origen del estudiante),
-//     porque el reporte es sobre participación formativa.
+// Filtros: from/to (fecha de inicio del curso), project, financingSource,
+// cftp, course, technicalArea, gender, age_min/age_max (edad actual),
+// resultado (SIN_CIERRE, EN_CURSO, EGRESADO, DESERTOR).
 
-const BASE_WHERE = `
-  WHERE pm.estatus = 1
-    AND ($1::uuid[] IS NULL OR pp.project_id = ANY($1::uuid[]))
-    AND ($2::int[]  IS NULL OR proc.centro_id = ANY($2::int[]))
+const BASE_JOINS = `
+  FROM centros.estudiantes e
+  JOIN centros.proceso_matriculas pm  ON pm.estudiante_id = e.id AND pm.estatus = 1
+  JOIN centros.procesos proc          ON proc.id = pm.proceso_id AND proc.estatus = 1 AND proc.cancelado = false
+  JOIN centros.centros c              ON c.id = proc.centro_id
+  JOIN centros.cursos cu              ON cu.id = proc.curso_id
+`;
+
+// Catálogos y último seguimiento: solo para el listado (el conteo no los usa).
+const DETAIL_JOINS = `
+  LEFT JOIN centros.departamentos d       ON d.id = e.departamento_id
+  LEFT JOIN centros.municipios mun        ON mun.id = e.municipio_id
+  LEFT JOIN centros.nivel_escolaridads ne ON ne.id = e.nivel_escolaridad_id
+  LEFT JOIN centros.discapacidads di      ON di.id = e.discapacidad_id
+  LEFT JOIN LATERAL (
+    SELECT s.estatus, s.fecha_corte FROM centros.seguimientos s
+     WHERE s.proceso_matricula_id = pm.id ORDER BY s.fecha_corte DESC LIMIT 1
+  ) us ON true
+`;
+
+const WHERE = `
+  WHERE ($1::date   IS NULL OR proc.fecha_inicial >= $1)
+    AND ($2::date   IS NULL OR proc.fecha_inicial <= $2)
     AND ($3::uuid[] IS NULL OR EXISTS (
-          SELECT 1 FROM caderh.project_financing_sources pfs
-          WHERE pfs.project_id = pp.project_id
-            AND pfs.financing_source_id = ANY($3::uuid[])
-        ))
-    AND ($4::int[] IS NULL OR EXISTS (
+          SELECT 1 FROM caderh.projects_processes pp
+           WHERE pp.process_id = proc.id AND pp.project_id = ANY($3::uuid[])))
+    AND ($4::uuid[] IS NULL OR EXISTS (
+          SELECT 1 FROM caderh.projects_processes pp
+            JOIN caderh.project_financing_sources pfs ON pfs.project_id = pp.project_id
+           WHERE pp.process_id = proc.id AND pfs.financing_source_id = ANY($4::uuid[])))
+    AND ($5::int[]  IS NULL OR proc.centro_id = ANY($5::int[]))
+    AND ($6::int[]  IS NULL OR proc.curso_id = ANY($6::int[]))
+    AND ($7::int[]  IS NULL OR EXISTS (
           SELECT 1 FROM centros.curso_areas ca
-          WHERE ca.curso_id = proc.curso_id
-            AND ca.area_id = ANY($4::int[])
-        ))
-    AND ($5::int[]  IS NULL OR c.municipio_id = ANY($5::int[]))
-    AND ($6::int    IS NULL OR EXTRACT(YEAR    FROM proc.fecha_inicial) = $6)
-    AND ($7::int    IS NULL OR EXTRACT(QUARTER FROM proc.fecha_inicial) = $7)
-    AND ($10::text[] IS NULL OR (
+           WHERE ca.curso_id = proc.curso_id AND ca.area_id = ANY($7::int[])))
+    AND ($8::text[] IS NULL OR ${GENERO_SQL('e.sexo')} = ANY($8::text[]))
+    AND ($9::int    IS NULL OR DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento))::int >= $9)
+    AND ($10::int   IS NULL OR DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento))::int <= $10)
+    AND ($11::text[] IS NULL OR (
           CASE
-            WHEN UPPER(TRIM(COALESCE(e.sexo,''))) IN ('M','MASCULINO','HOMBRE') THEN 'M'
-            WHEN UPPER(TRIM(COALESCE(e.sexo,''))) IN ('F','FEMENINO','MUJER')   THEN 'F'
-            ELSE NULL
-          END = ANY($10::text[])
-        ))
-    AND ($8::int IS NULL OR
-          DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento))::int >= $8)
-    AND ($9::int IS NULL OR
-          DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento))::int <= $9)
+            WHEN pm.resultado IS NOT NULL THEN pm.resultado
+            WHEN proc.fecha_final < CURRENT_DATE THEN 'SIN_CIERRE'
+            ELSE 'EN_CURSO'
+          END) = ANY($11::text[]))
 `;
 
 const SQL = `
   SELECT
     ROW_NUMBER() OVER (ORDER BY e.apellidos, e.nombres, proc.fecha_inicial)::int AS num,
     c.nombre                                       AS centro,
-    mun.nombre                                     AS ciudad,
     cu.nombre                                      AS curso,
-    (SELECT STRING_AGG(DISTINCT a.nombre, ', ' ORDER BY a.nombre)
-       FROM centros.curso_areas ca
-       JOIN centros.areas a ON a.id = ca.area_id
-       WHERE ca.curso_id = proc.curso_id)          AS area_tecnica,
-    -- Fuente(s) de financiamiento de los proyectos vinculados al proceso de la
-    -- matrícula. Subconsulta correlacionada para no multiplicar filas cuando
-    -- un proceso tiene varios proyectos/fuentes.
-    (SELECT STRING_AGG(DISTINCT fs.name, ', ' ORDER BY fs.name)
-       FROM caderh.projects_processes pp2
-       JOIN caderh.project_financing_sources pfs2 ON pfs2.project_id = pp2.project_id
-       JOIN caderh.financing_sources fs           ON fs.id = pfs2.financing_source_id
-       WHERE pp2.process_id = proc.id)             AS fuentes_financiamiento,
-    EXTRACT(YEAR    FROM proc.fecha_inicial)::int  AS anio,
-    EXTRACT(QUARTER FROM proc.fecha_inicial)::int  AS trimestre,
+    proc.codigo                                    AS codigo_proceso,
+    proc.fecha_inicial::text                       AS inicio,
+    (SELECT a.nombre FROM centros.curso_areas ca JOIN centros.areas a ON a.id = ca.area_id
+      WHERE ca.curso_id = proc.curso_id ORDER BY ca.id LIMIT 1) AS area_tecnica,
+    (SELECT STRING_AGG(DISTINCT p.name, ', ' ORDER BY p.name)
+       FROM caderh.projects_processes pp JOIN caderh.projects p ON p.id = pp.project_id
+      WHERE pp.process_id = proc.id AND p.project_status <> 'DELETED') AS proyectos,
     CONCAT(e.nombres, ' ', e.apellidos)            AS nombre_completo,
     e.identidad                                    AS dni,
-    -- ::text para conservar el formato YYYY-MM-DD en el JSON (la columna ya es DATE).
     e.fecha_nacimiento::text                       AS fecha_nacimiento,
     DATE_PART('year', AGE(CURRENT_DATE, e.fecha_nacimiento))::int AS edad,
-    -- Display: canónico 'M'/'F' (y variantes heredadas) → etiqueta completa.
-    CASE
-      WHEN UPPER(TRIM(COALESCE(e.sexo,''))) IN ('M','MASCULINO','HOMBRE') THEN 'Masculino'
-      WHEN UPPER(TRIM(COALESCE(e.sexo,''))) IN ('F','FEMENINO','MUJER')   THEN 'Femenino'
-      ELSE e.sexo
-    END                                            AS sexo,
+    CASE ${GENERO_SQL('e.sexo')} WHEN 'M' THEN 'Masculino' WHEN 'F' THEN 'Femenino' ELSE e.sexo END AS sexo,
     e.estado_civil                                 AS estado_civil,
-    e.celular                                      AS telefono_celular,
+    e.celular                                      AS celular,
+    NULLIF(CONCAT_WS(' · ', NULLIF(TRIM(e.telefono_r), ''), NULLIF(TRIM(e.nombre_r), '')), '') AS telefono_alternativo,
     e.email                                        AS correo,
+    NULLIF(CONCAT_WS(' / ', NULLIF(TRIM(e.facebook), ''), NULLIF(TRIM(e.instagram), '')), '') AS redes,
     d.nombre                                       AS departamento,
+    mun.nombre                                     AS municipio,
     e.direccion                                    AS direccion,
     e.vive                                         AS con_quien_vive,
-    e.tiene_hijos                                  AS tiene_hijos,
-    e.discapacidad_id                              AS discapacidad,
-    e.trabajo_actual                               AS trabajo_actual,
-    e.donde_trabaja                                AS donde_trabaja,
-    e.estudia                                      AS estudia,
-    e.autoempleo                                   AS autoempleo
-  FROM centros.estudiantes e
-  JOIN centros.proceso_matriculas pm  ON pm.estudiante_id = e.id
-  JOIN centros.procesos proc          ON proc.id = pm.proceso_id
-  JOIN centros.centros c              ON c.id = proc.centro_id
-  LEFT JOIN centros.municipios mun    ON mun.id = c.municipio_id
-  LEFT JOIN centros.departamentos d   ON d.id = e.departamento_id
-  JOIN centros.cursos cu              ON cu.id = proc.curso_id
-  LEFT JOIN caderh.projects_processes pp ON pp.process_id = proc.id
-  ${BASE_WHERE}
+    NULLIF(TRIM(e.numero_dep), '')                 AS dependientes,
+    CASE WHEN e.tiene_hijos = 1 THEN 'Sí' ELSE 'No' END AS tiene_hijos,
+    CASE
+      WHEN di.nombre IS NULL OR LOWER(di.nombre) = 'ninguna' THEN NULLIF(TRIM(e.discapacidad_detalle), '')
+      ELSE CONCAT_WS(': ', di.nombre, NULLIF(TRIM(e.discapacidad_detalle), ''))
+    END                                            AS discapacidad,
+    CASE WHEN e.interno = 1 THEN 'Sí' ELSE 'No' END AS interno,
+    ne.nombre                                      AS nivel_educativo,
+    CASE WHEN e.estudia = 1 THEN 'Sí' ELSE 'No' END AS estudia,
+    CASE WHEN e.trabajo_actual = 1 THEN 'Sí' ELSE 'No' END AS trabaja,
+    e.donde_trabaja                                AS empresa,
+    e.puesto                                       AS puesto,
+    e.tipo_contrato_ant                            AS tipo_contrato,
+    NULLIF(CONCAT_WS(' · ', NULLIF(TRIM(e.beneficios_empleo), ''), NULLIF(TRIM(e.beneficios_empleo_otro), '')), '') AS beneficios,
+    CASE WHEN e.autoempleo = 1 THEN COALESCE(NULLIF(TRIM(e.autoempleo_dedicacion), ''), 'Sí') END AS emprendimiento,
+    CASE WHEN e.autoempleo = 1 THEN NULLIF(TRIM(e.autoempleo_tiempo), '') END AS antiguedad_emprendimiento,
+    NULLIF(e.ingreso_promedio, 0)                  AS ingreso_hogar,
+    e.observaciones                                AS observaciones,
+    CASE
+      WHEN pm.resultado = 'EGRESADO' THEN 'Egresó'
+      WHEN pm.resultado = 'DESERTOR' THEN 'Desertó'
+      WHEN proc.fecha_final < CURRENT_DATE THEN 'Sin cierre'
+      ELSE 'En curso'
+    END                                            AS resultado,
+    us.estatus                                     AS estatus_seguimiento,
+    us.fecha_corte::text                           AS fecha_seguimiento
+  ${BASE_JOINS}
+  ${DETAIL_JOINS}
+  ${WHERE}
   ORDER BY e.apellidos, e.nombres, proc.fecha_inicial
-  LIMIT $11 OFFSET $12
+  LIMIT $12 OFFSET $13
 `;
 
-const COUNT_SQL = `
-  SELECT COUNT(*)::int AS total
-  FROM centros.estudiantes e
-  JOIN centros.proceso_matriculas pm  ON pm.estudiante_id = e.id
-  JOIN centros.procesos proc          ON proc.id = pm.proceso_id
-  JOIN centros.centros c              ON c.id = proc.centro_id
-  JOIN centros.cursos cu              ON cu.id = proc.curso_id
-  LEFT JOIN caderh.projects_processes pp ON pp.process_id = proc.id
-  ${BASE_WHERE}
-`;
+const COUNT_SQL = `SELECT COUNT(*)::int AS total ${BASE_JOINS} ${WHERE}`;
 
-function parseUuids(raw) {
-  if (!raw) return null;
-  return (Array.isArray(raw) ? raw : String(raw).split(','))
-    .map((s) => String(s).trim())
-    .filter(Boolean);
-}
+const RESULTADOS = ['SIN_CIERRE', 'EN_CURSO', 'EGRESADO', 'DESERTOR'];
 
-function parseInts(raw) {
-  if (!raw) return null;
-  return (Array.isArray(raw) ? raw : String(raw).split(','))
-    .map((s) => parseInt(String(s).trim(), 10))
-    .filter(Number.isFinite);
-}
-
-function parseInt1(raw) {
-  if (!raw) return null;
-  const n = parseInt(String(raw).trim(), 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-function parseQuarter(raw) {
-  if (!raw) return null;
-  const s = String(raw).trim().toUpperCase();
-  const m = s.match(/^Q?([1-4])$/);
-  return m ? parseInt(m[1], 10) : null;
-}
-
-function parseGender(raw) {
-  if (!raw) return null;
-  const arr = (Array.isArray(raw) ? raw : String(raw).split(','))
-    .map((s) => String(s).trim().toUpperCase())
-    .filter((s) => s === 'M' || s === 'F');
-  return arr.length ? arr : null;
-}
-
-// Catálogo "¿Con quién vive?" — fuente: src/api/centros/centros.api.js
-// (GET /centros/vive-catalogo). El SGC heredado guardó el campo como arreglo
-// JSON de ids posicionales (1..5) sobre este mismo catálogo; los registros
-// nuevos guardan el label directamente.
-const VIVE_LABELS = {
-  1: 'Padres',
-  2: 'Solo(a)',
-  3: 'Pareja',
-  4: 'Familiares',
-  5: 'Otros',
-};
-
-// '["1"]' → 'Padres' · '["1","3"]' → 'Padres, Pareja' · 'Padres' → 'Padres'.
-// Defensivo con null/vacío/JSON malformado: devuelve null o el texto crudo.
+// "¿Con quién vive?" del SGC heredado: arreglo JSON de ids posicionales (1..5);
+// los registros nuevos guardan la etiqueta. Fuente: GET /centros/vive-catalogo.
+const VIVE_LABELS = { 1: 'Padres', 2: 'Solo(a)', 3: 'Pareja', 4: 'Familiares', 5: 'Otros' };
 function formatConQuienVive(raw) {
   if (raw == null) return null;
-  // El SGC guardó el JSON con comillas escapadas literales (ej. [\"1\"]);
-  // se limpian los backslashes antes de parsear.
   const s = String(raw).trim().replace(/\\/g, '');
   if (!s || s.toLowerCase() === 'null') return null;
   if (s.startsWith('[')) {
     try {
       const arr = JSON.parse(s);
       if (Array.isArray(arr)) {
-        const labels = arr
-          .map((v) => VIVE_LABELS[parseInt(String(v), 10)] ?? String(v).trim())
-          .filter(Boolean);
+        const labels = arr.map((v) => VIVE_LABELS[parseInt(String(v), 10)] ?? String(v).trim()).filter(Boolean);
         return labels.length ? labels.join(', ') : null;
       }
     } catch {
-      // JSON malformado — se muestra el texto tal cual
+      // JSON malformado: se muestra el texto tal cual
     }
   }
   return s;
 }
 
-// discapacidad_id es TEXT libre; vacío o el literal 'null' se normaliza a null
-// para que el frontend pinte '—' en vez del string 'null'.
-function cleanText(raw) {
-  if (raw == null) return null;
-  const s = String(raw).trim();
-  if (!s || s.toLowerCase() === 'null') return null;
-  return s;
-}
-
 export const handler = reportHandler(async (req) => {
-  const projectUuids     = parseUuids(req.query.project);
-  const centroIds        = parseInts(req.query.cftp);
-  const financingUuids   = parseUuids(req.query.financingSource);
-  const technicalAreaIds = parseInts(req.query.technicalArea);
-  const cityIds          = parseInts(req.query.city);
-  const year             = parseInt1(req.query.year);
-  const quarter          = parseQuarter(req.query.quarter);
-  const ageMin           = parseInt1(req.query.age_min);
-  const ageMax           = parseInt1(req.query.age_max);
-  const genders          = parseGender(req.query.gender);
-
-  const { pageSize, offset } = parsePagination(req.query);
-
+  const q = req.query;
   const filterBinds = [
-    projectUuids,     // $1
-    centroIds,        // $2
-    financingUuids,   // $3
-    technicalAreaIds, // $4
-    cityIds,          // $5
-    year,             // $6
-    quarter,          // $7
-    ageMin,           // $8
-    ageMax,           // $9
-    genders,          // $10
+    parseIsoDate(q.from),                       // $1
+    parseIsoDate(q.to),                         // $2
+    parseUuidList(q.project),                   // $3
+    parseUuidList(q.financingSource),           // $4
+    parseIntList(q.cftp),                       // $5
+    parseIntList(q.course),                     // $6
+    parseIntList(q.technicalArea),              // $7
+    parseEnumList(q.gender, ['M', 'F']),        // $8
+    parseIntValue(q.age_min),                   // $9
+    parseIntValue(q.age_max),                   // $10
+    parseEnumList(q.resultado, RESULTADOS),     // $11
   ];
+  const { pageSize, offset } = parsePagination(q);
 
-  const [rows] = await sequelize.query(SQL, {
-    bind: [...filterBinds, pageSize, offset],
-  });
-  const [countRows] = await sequelize.query(COUNT_SQL, { bind: filterBinds });
-
-  const total = countRows[0]?.total ?? 0;
-
-  const out = rows.map((r) => ({
-    ...r,
-    con_quien_vive: formatConQuienVive(r.con_quien_vive),
-    discapacidad: cleanText(r.discapacidad),
-  }));
+  const [rows] = await sequelize.query(SQL, { bind: [...filterBinds, pageSize, offset] });
+  const [[{ total }]] = await sequelize.query(COUNT_SQL, { bind: filterBinds });
 
   return {
-    rows: out,
+    rows: rows.map((r) => ({
+      ...r,
+      con_quien_vive: formatConQuienVive(r.con_quien_vive),
+      ingreso_hogar: r.ingreso_hogar != null ? Number(r.ingreso_hogar) : null,
+      estatus_seguimiento: r.estatus_seguimiento ? ESTATUS_SEGUIMIENTO[r.estatus_seguimiento] : null,
+    })),
     total,
-    kpis: {
-      totalRegistros: total,
-    },
-    meta: {
-      missingColumns: [
-        'tipoContratacion', 'beneficiosLaborales', 'fechaIngresoLaboral',
-        'nombreEmprendimiento', 'rubroEmprendimiento', 'antiguedadEmprendimiento',
-        'ingresoMensualFamiliar', 'facebookInstagram', 'migranteRetornado',
-        'puestoActual', 'rangoSalario',
-      ],
-    },
+    kpis: { totalRegistros: total },
+    meta: { missingColumns: ['migranteRetornado'] },
   };
 });

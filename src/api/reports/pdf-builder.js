@@ -43,16 +43,23 @@ function isPercentKey(k) {
   return /(pct|porcent|%)/i.test(k);
 }
 
-function formatCellValue(value, columnKey, missingInDb) {
+// `format` explícito de la columna (money | percent | count | year | text)
+// manda; sin él se infiere por el nombre de la key (reportes anteriores).
+function formatCellValue(value, columnKey, missingInDb, format) {
   if (missingInDb) return '—';
   if (value == null || value === '') return '';
   // Un año no lleva separador de miles ("2026", no "2,026").
-  if (/^(year|anio|año)$/i.test(columnKey)) return String(value);
+  if (format === 'year' || format === 'text' || /^(year|anio|año|cohorte)$/i.test(columnKey)) return String(value);
+  // Fecha 'YYYY-MM-DD' → '18/03/2026', como en la tabla.
+  if (format === 'date') {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
+    return m ? `${m[3]}/${m[2]}/${m[1]}` : String(value);
+  }
   if (typeof value === 'number' && Number.isFinite(value)) {
-    if (isCurrencyKey(columnKey)) {
+    if (format === 'money' || (!format && isCurrencyKey(columnKey))) {
       return `L ${value.toLocaleString('es-HN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     }
-    if (isPercentKey(columnKey)) {
+    if (format === 'percent' || (!format && isPercentKey(columnKey))) {
       return `${value.toFixed(1)}%`;
     }
     return value.toLocaleString('es-HN');
@@ -79,6 +86,7 @@ export async function generateReportPdf({
   code,
   columns,
   rows,
+  totals = null,
   filtersApplied = {},
   missingColumns = [],
 }) {
@@ -93,15 +101,29 @@ export async function generateReportPdf({
     alignment: c.align ?? 'left',
   }));
 
+  // Filas de subtotal (rowKind: 'subtotal', p. ej. por área en R1) en negrita.
   const dataRows = safeRows.map((row) =>
     safeColumns.map((c) => ({
-      text: formatCellValue(row?.[c.key], c.key, c.missingInDb),
+      text: formatCellValue(row?.[c.key], c.key, c.missingInDb, c.format),
       alignment: c.align ?? 'left',
       style: 'tableCell',
+      ...(row?.rowKind === 'subtotal' ? { bold: true, fillColor: CADERH_TEAL_SOFT } : {}),
     }))
   );
 
-  const tableBody = [headerRow, ...dataRows];
+  // Fila de totales que devuelve el reporte (antes no llegaba al PDF).
+  const totalsRows = [];
+  if (totals && safeRows.length > 0 && safeColumns.some((c) => totals[c.key] != null)) {
+    totalsRows.push(safeColumns.map((c, idx) => {
+      const raw = totals[c.key];
+      const text = raw != null
+        ? formatCellValue(raw, c.key, c.missingInDb, c.format)
+        : (idx === 0 ? 'Total' : '');
+      return { text, alignment: c.align ?? 'left', style: 'tableCell', bold: true, fillColor: CADERH_TEAL_SOFT };
+    }));
+  }
+
+  const tableBody = [headerRow, ...dataRows, ...totalsRows];
 
   const filtersEntries = Object.entries(filtersApplied).filter(
     ([, v]) => v != null && v !== '' && !(Array.isArray(v) && v.length === 0)

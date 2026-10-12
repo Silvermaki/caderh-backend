@@ -150,6 +150,30 @@ export function normalizeCatalogId(value, label) {
     return { error: `${label} inválido: "${String(value).trim()}". Debe ser un entero del catálogo o vacío` };
 }
 
+// Tipo de contratación del empleo anterior (migración 1772350000000, valores
+// del Anexo I del cliente). Acepta mayúsculas/minúsculas y tildes; vacío → null.
+export const TIPOS_CONTRATO = ["Permanente", "Temporal", "Por eventos", "Ninguno"];
+
+export function normalizeTipoContrato(value) {
+    if (value === null || value === undefined || String(value).trim() === "") return { value: null };
+    const key = String(value).normalize("NFD").replace(/[̀-ͯ]/g, "").trim().toLowerCase().replace(/\s+/g, " ");
+    const found = TIPOS_CONTRATO.find((t) => t.toLowerCase() === key);
+    if (found) return { value: found };
+    if (["por evento", "eventos", "evento"].includes(key)) return { value: "Por eventos" };
+    if (["n/a", "na", "no aplica", "ninguna"].includes(key)) return { value: "Ninguno" };
+    return { error: `Tipo de contrato inválido: "${String(value).trim()}". Use ${TIPOS_CONTRATO.join(", ")}` };
+}
+
+// Texto libre con tope de caracteres (Word: "observaciones con un número
+// determinado de caracteres"). Vacío → null; más largo → error.
+export function normalizeTextoLimitado(value, max, label) {
+    if (value === null || value === undefined) return { value: null };
+    const s = String(value).trim();
+    if (!s) return { value: null };
+    if (s.length > max) return { error: `${label} admite hasta ${max} caracteres (tiene ${s.length})` };
+    return { value: s };
+}
+
 // Banderas sí/no → 0/1 (coerción, nunca error: cualquier cosa rara cae a 0/1).
 export function coerceFlag(value) {
     if (value === null || value === undefined || value === "") return 0;
@@ -194,6 +218,15 @@ export function buildStudentPayload(b) {
     const nivel_escolaridad_id = take(normalizeCatalogId(b.nivel_escolaridad_id, "Nivel de escolaridad"));
     const discapacidad_id = take(normalizeCatalogId(b.discapacidad_id, "Discapacidad"));
     const etnia_id = take(normalizeCatalogId(b.etnia_id, "Etnia"));
+    const tipo_contrato_ant = take(normalizeTipoContrato(b.tipo_contrato_ant));
+    // Campos nuevos (migración 1772350000000): solo se escriben si vienen en
+    // el body, para que un cliente o una plantilla anterior no los borre.
+    const discapacidad_detalle = b.discapacidad_detalle !== undefined
+        ? take(normalizeTextoLimitado(b.discapacidad_detalle, 300, "El detalle de la discapacidad"))
+        : undefined;
+    const observaciones = b.observaciones !== undefined
+        ? take(normalizeTextoLimitado(b.observaciones, 1000, "Observaciones"))
+        : undefined;
 
     const payload = {
         identidad,
@@ -227,7 +260,7 @@ export function buildStudentPayload(b) {
         puesto: strOrNull(b.puesto),
         trabajado_ant: coerceFlag(b.trabajado_ant),
         tiempo_ant: strOrNull(b.tiempo_ant),
-        tipo_contrato_ant: intOrDefault(b.tipo_contrato_ant, null),
+        tipo_contrato_ant,
         beneficios_empleo: strOrNull(b.beneficios_empleo),
         beneficios_empleo_otro: strOrNull(b.beneficios_empleo_otro),
         autoempleo: coerceFlag(b.autoempleo),
@@ -240,8 +273,10 @@ export function buildStudentPayload(b) {
         socios_cantidad: intOrDefault(b.socios_cantidad, 0),
         especial: coerceFlag(b.especial),
         discapacidad_id,
+        ...(discapacidad_detalle !== undefined ? { discapacidad_detalle } : {}),
         etnia_id,
         interno: coerceFlag(b.interno),
+        ...(observaciones !== undefined ? { observaciones } : {}),
         nombre_r: strOrNull(b.nombre_r),
         telefono_r: strOrNull(b.telefono_r),
         datos_r: strOrNull(b.datos_r),
