@@ -65,6 +65,17 @@ const SQL = `
   ORDER BY cohorte DESC, c.nombre, cu.nombre, e.apellidos, e.nombres
 `;
 
+// Sin egresados en todo el sistema, un reporte vacío no se debe a los filtros:
+// aún no se registra el cierre de los cursos (el frontend lo explica).
+const HAY_EGRESADOS_SQL = `
+  SELECT EXISTS (
+    SELECT 1
+      FROM centros.proceso_matriculas pm
+      JOIN centros.procesos proc ON proc.id = pm.proceso_id AND proc.estatus = 1 AND proc.cancelado = false
+     WHERE pm.estatus = 1 AND pm.resultado = 'EGRESADO'
+  ) AS hay
+`;
+
 const GRUPOS = ['TRABAJANDO', 'EMPRENDIENDO', 'ESTUDIANDO', 'BUSQUEDA_EMPLEO', 'EN_PASANTIA', 'OTRO', 'SIN_SEGUIMIENTO'];
 
 function hoyIso() {
@@ -104,6 +115,11 @@ export const handler = reportHandler(async (req) => {
   const conteo = Object.fromEntries(GRUPOS.map((g) => [g, 0]));
   for (const r of conGrupo) conteo[r.grupo]++;
   const totalEgresados = conGrupo.length;
+  let hayEgresados = totalEgresados > 0;
+  if (!hayEgresados) {
+    const [[{ hay }]] = await sequelize.query(HAY_EGRESADOS_SQL);
+    hayEgresados = hay;
+  }
 
   const filtradas = grupos ? conGrupo.filter((r) => grupos.includes(r.grupo)) : conGrupo;
   const out = filtradas.map((r, i) => {
@@ -151,6 +167,6 @@ export const handler = reportHandler(async (req) => {
       pctEmprendiendo: pct(conteo.EMPRENDIENDO, totalEgresados),
       pctEstudiando: pct(conteo.ESTUDIANDO, totalEgresados),
     },
-    meta: { corte },
+    meta: { corte, hayEgresados },
   };
 });

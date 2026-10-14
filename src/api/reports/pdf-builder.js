@@ -6,8 +6,6 @@ const CADERH_TEAL_SOFT = '#E6F4F4';
 const ZEBRA_GREY       = '#F7FAFA';
 const TEXT_DARK        = '#1F2937';
 const MUTED            = '#6B7280';
-const WARN_AMBER       = '#92400E';
-const WARN_AMBER_SOFT  = '#FEF3C7';
 
 // PDFKit ships with the standard 14 PDF fonts built-in (Helvetica family),
 // so we don't need to bundle TTF files. pdfmake just needs the font logical
@@ -77,7 +75,6 @@ function formatCellValue(value, columnKey, missingInDb, format) {
  * @param {Array<{key: string, label: string, align?: 'left'|'right'|'center', missingInDb?: boolean}>} args.columns
  * @param {Array<Record<string, any>>} args.rows
  * @param {Record<string, any>} [args.filtersApplied]
- * @param {string[]} [args.missingColumns]
  * @returns {Promise<Buffer>}
  */
 export async function generateReportPdf({
@@ -88,7 +85,6 @@ export async function generateReportPdf({
   rows,
   totals = null,
   filtersApplied = {},
-  missingColumns = [],
 }) {
   const safeColumns = Array.isArray(columns) && columns.length > 0
     ? columns
@@ -211,22 +207,6 @@ export async function generateReportPdf({
     });
   }
 
-  if (missingColumns.length > 0) {
-    content.push(
-      {
-        text: `Nota: ${missingColumns.length} columna(s) pendiente(s) de captura en el sistema`,
-        style: 'missingHeader',
-        fillColor: WARN_AMBER_SOFT,
-        margin: [0, 16, 0, 4],
-      },
-      {
-        ul: missingColumns,
-        style: 'missingItem',
-        margin: [10, 0, 0, 0],
-      }
-    );
-  }
-
   const docDefinition = {
     pageSize: 'A4',
     pageOrientation: 'landscape',
@@ -248,8 +228,6 @@ export async function generateReportPdf({
       tableHeader: { color: '#FFFFFF', bold: true, fontSize: 9 },
       tableCell: { fontSize: 8, color: TEXT_DARK },
       emptyNote: { fontSize: 10, italics: true, color: MUTED, alignment: 'center' },
-      missingHeader: { fontSize: 9, bold: true, italics: true, color: WARN_AMBER },
-      missingItem: { fontSize: 8, italics: true, color: MUTED },
     },
   };
 

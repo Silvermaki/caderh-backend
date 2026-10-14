@@ -161,11 +161,6 @@ router.post('/:reportId/export/pdf', async (req, res, next) => {
 
     const rows = captured.payload?.rows ?? [];
     const totals = captured.payload?.totals ?? null;
-    const meta = captured.payload?.meta ?? {};
-
-    const missingColumns = Array.isArray(columns)
-      ? columns.filter((c) => c?.missingInDb).map((c) => c.label || c.key)
-      : [];
 
     const buffer = await generateReportPdf({
       title,
@@ -175,7 +170,6 @@ router.post('/:reportId/export/pdf', async (req, res, next) => {
       rows,
       totals,
       filtersApplied: filtersDisplay && typeof filtersDisplay === 'object' ? filtersDisplay : filters,
-      missingColumns: missingColumns.length > 0 ? missingColumns : (meta.missingColumns ?? []),
     });
 
     res.setHeader('Content-Type', 'application/pdf');
