@@ -11,7 +11,8 @@ import { ESTATUS_SEGUIMIENTO } from '../../../utils/egresados-catalogos.js';
 // qué campos están vigentes), el resultado del curso y el último estatus de
 // seguimiento. Los datos laborales del formulario son de la INSCRIPCIÓN.
 //
-// Filtros: from/to (fecha de inicio del curso), project, financingSource,
+// Filtros: from/to (período: cursos en marcha o terminados en el rango, como
+// define la AC-R-022), project, financingSource,
 // cftp, course, technicalArea, gender, age_min/age_max (edad actual),
 // resultado (SIN_CIERRE, EN_CURSO, EGRESADO, DESERTOR).
 
@@ -35,8 +36,10 @@ const DETAIL_JOINS = `
   ) us ON true
 `;
 
+// Período (AC-R-022, "cursos en proceso o terminados"): el curso se cruza con
+// [desde, hasta]; entran los que ya venían en marcha.
 const WHERE = `
-  WHERE ($1::date   IS NULL OR proc.fecha_inicial >= $1)
+  WHERE ($1::date   IS NULL OR proc.fecha_final IS NULL OR proc.fecha_final >= $1)
     AND ($2::date   IS NULL OR proc.fecha_inicial <= $2)
     AND ($3::uuid[] IS NULL OR EXISTS (
           SELECT 1 FROM caderh.projects_processes pp

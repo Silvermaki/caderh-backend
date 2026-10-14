@@ -17,8 +17,9 @@ import {
 //   · Proyecto y fuente se filtran con EXISTS: un proceso puede estar en varios
 //     proyectos y no debe contarse dos veces.
 //
-// Filtros: from/to (fecha de inicio del curso), project, financingSource, cftp,
-// technicalArea, city (municipio), age_min/age_max (edad al iniciar el curso).
+// Filtros: from/to (período: cursos en marcha o terminados en el rango, como
+// define la AC-R-022), project, financingSource, cftp, technicalArea, city
+// (municipio), age_min/age_max (edad al iniciar el curso).
 
 const SQL = `
   WITH mat AS (
@@ -46,7 +47,9 @@ const SQL = `
     LEFT JOIN centros.municipios mcu ON mcu.id = cu.municipio_id
     LEFT JOIN centros.municipios mce ON mce.id = c.municipio_id
     WHERE pm.estatus = 1
-      AND ($1::date   IS NULL OR proc.fecha_inicial >= $1)
+      -- Período (AC-R-022, "cursos en proceso o terminados"): el curso se cruza
+      -- con [desde, hasta]; entran los que ya venían en marcha.
+      AND ($1::date   IS NULL OR proc.fecha_final IS NULL OR proc.fecha_final >= $1)
       AND ($2::date   IS NULL OR proc.fecha_inicial <= $2)
       AND ($3::uuid[] IS NULL OR EXISTS (
             SELECT 1 FROM caderh.projects_processes pp

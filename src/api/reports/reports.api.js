@@ -8,15 +8,14 @@ import { handler as r4 } from './reports/r4-seguimiento.js';
 import { handler as r5 } from './reports/r5-kits.js';
 import { handler as r6 } from './reports/r6-ingreso-proyecto.js';
 import { handler as r7 } from './reports/r7-ingreso-consolidado.js';
-import { handler as r8 } from './reports/r8-overhead.js';
-import { handler as r9 } from './reports/r9-presupuesto.js';
-import { handler as r10 } from './reports/r10-empresas.js';
-import { handler as r11 } from './reports/r11-template.js';
+import { handler as r8 } from './reports/r8-presupuesto.js';
 import { generateReportPdf } from './pdf-builder.js';
 
-// Reportes activos: R1-R11. R12-R14 (Contratado a Centros, Pagado a Instructores,
-// Estipendios a jóvenes) están fuera de alcance — esos pagos no se manejan en
-// el ERP CADERH. Sus requerimientos viven en docs/requerimientos-modulo-reportes.md
+// Reportes activos: R1-R8. Overhead, empresas y donantes y la AC-R-022 se
+// retiraron del catálogo el 14/10/2026 (sin datos de origen); presupuesto
+// ejecutado vs programado pasó de R9 a R8. Lo contratado a centros, lo pagado a instructores y los estipendios
+// a jóvenes (antes R12-R14) están fuera de alcance — esos pagos no se manejan
+// en el ERP CADERH. Sus requerimientos viven en docs/requerimientos-modulo-reportes.md
 // como referencia histórica del cliente.
 
 const REPORT_HANDLERS = {
@@ -27,10 +26,7 @@ const REPORT_HANDLERS = {
   'r5-kits-emprendimiento': r5,
   'r6-ingreso-proyecto': r6,
   'r7-ingreso-consolidado': r7,
-  'r8-overhead': r8,
-  'r9-presupuesto-vs-ejecutado': r9,
-  'r10-empresas-donantes': r10,
-  'r11-informe-ac-r-022': r11,
+  'r8-presupuesto-vs-ejecutado': r8,
 };
 
 export const router = Router();
@@ -46,10 +42,7 @@ router.get('/', (_req, res) => {
       'r5-kits-emprendimiento',
       'r6-ingreso-proyecto',
       'r7-ingreso-consolidado',
-      'r8-overhead',
-      'r9-presupuesto-vs-ejecutado',
-      'r10-empresas-donantes',
-      'r11-informe-ac-r-022',
+      'r8-presupuesto-vs-ejecutado',
     ],
   });
 });
@@ -98,10 +91,7 @@ router.get('/r4-seguimiento-post-formacion', r4);
 router.get('/r5-kits-emprendimiento', r5);
 router.get('/r6-ingreso-proyecto', r6);
 router.get('/r7-ingreso-consolidado', r7);
-router.get('/r8-overhead', r8);
-router.get('/r9-presupuesto-vs-ejecutado', r9);
-router.get('/r10-empresas-donantes', r10);
-router.get('/r11-informe-ac-r-022', r11);
+router.get('/r8-presupuesto-vs-ejecutado', r8);
 
 // ─── PDF export ─────────────────────────────────────────────────────────────
 // Generic export endpoint: replays the report handler with the supplied filters
